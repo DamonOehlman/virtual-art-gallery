@@ -254,6 +254,19 @@ module.exports = function ({getGridSegments, getGridParts}, fovY, canvas, viewpo
 			mat4.perspective(proj, fovY(), w / h, 0.1, 100);
 			return proj;
 		},
+		// The exact world-space ray through the centre of the screen (crosshair),
+		// unprojected from NDC (0,0) via the current proj+view — same construction
+		// the touch-teleport raycast uses. Used by current() to pick the artwork
+		// literally under the crosshair rather than by bearing heuristics.
+		centerRay: () => {
+			let tmp = [];
+			let dir = [0, 0, 0];
+			vec3.transformMat4(dir, dir, mat4.invert(tmp, proj));
+			vec3.transformMat4(dir, dir, mat4.invert(tmp, view));
+			vec3.sub(dir, dir, pos);
+			vec3.normalize(dir, dir);
+			return { origin: [pos[0], pos[1], pos[2]], dir };
+		},
 		tick: ({ time }) => {
 			// Delta time
 			const dt = time - lastTime;

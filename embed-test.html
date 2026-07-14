@@ -9,8 +9,19 @@
     button { padding: 6px 12px; cursor: pointer; }
     #stage {
       /* Deliberately a SUB-REGION, not fullscreen, to prove embedding. */
+      position: relative;
       width: 640px; height: 400px; margin: 12px 14px;
       border: 2px solid #4c8; border-radius: 6px; overflow: hidden; background: #000;
+    }
+    /* Crosshair marking the exact screen-centre ray current() raycasts. */
+    #crosshair {
+      position: absolute; left: 50%; top: 50%; width: 12px; height: 12px;
+      margin: -6px 0 0 -6px; border: 1px solid #0f8; border-radius: 50%;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none; z-index: 2;
+    }
+    #crosshair::after {
+      content: ""; position: absolute; left: 50%; top: 50%;
+      width: 2px; height: 2px; margin: -1px 0 0 -1px; background: #0f8;
     }
     #readout { padding: 8px 14px; font: 12px/1.5 ui-monospace, monospace; white-space: pre; color: #9cf; }
     input { padding: 5px 8px; }
@@ -29,7 +40,7 @@
     <label>host input (type WASD here in Menu mode): <input id="host" placeholder="should work in Menu mode only"></label>
   </header>
 
-  <div id="stage"></div>
+  <div id="stage"><div id="crosshair"></div></div>
   <div id="readout">not mounted</div>
 
   <script src="embed-test.bundle.js"></script>
@@ -66,9 +77,11 @@
     setInterval(() => {
       const c = window.gallery.current();
       const cam = window.gallery.camera();
+      const dbg = window.gallery.gazeDebug();
       readout.textContent =
         'current(): ' + (c ? JSON.stringify(c) : 'null') + '\n' +
-        'camera():  ' + (cam ? `pos=[${cam.pos.map(n=>n.toFixed(1))}] yaw=${cam.yaw.toFixed(2)} pitch=${cam.pitch.toFixed(2)}` : 'null');
+        'camera():  ' + (cam ? `pos=[${cam.pos.map(n=>n.toFixed(1))}] yaw=${cam.yaw.toFixed(2)} pitch=${cam.pitch.toFixed(2)}` : 'null') + '\n' +
+        'gaze dbg:  ' + (dbg ? JSON.stringify(dbg) : 'null') + '  (top = most-aligned piece, ungated: dot≈1 means dead-centre)';
     }, 400);
   </script>
 </body>

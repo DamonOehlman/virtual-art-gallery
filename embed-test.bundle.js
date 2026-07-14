@@ -119,10 +119,7 @@ var resolutions = {
   low: 400,
   mid: 843,
   high: 1686
-}; // Configure which collection to display
-// Update this policy_id to show different CNFT collections
-
-var policyId = "8972aab912aed2cf44b65916e206324c6bdcb6fbd3dc4eb634fdbd28";
+};
 module.exports = {
   fetchList: function () {
     var _fetchList = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee(from, count) {
@@ -9890,6 +9887,22 @@ module.exports = function (_ref, fovY, canvas, viewport) {
       mat4.perspective(_proj, fovY(), w / h, 0.1, 100);
       return _proj;
     },
+    // The exact world-space ray through the centre of the screen (crosshair),
+    // unprojected from NDC (0,0) via the current proj+view — same construction
+    // the touch-teleport raycast uses. Used by current() to pick the artwork
+    // literally under the crosshair rather than by bearing heuristics.
+    centerRay: function centerRay() {
+      var tmp = [];
+      var dir = [0, 0, 0];
+      vec3.transformMat4(dir, dir, mat4.invert(tmp, _proj));
+      vec3.transformMat4(dir, dir, mat4.invert(tmp, _view));
+      vec3.sub(dir, dir, pos);
+      vec3.normalize(dir, dir);
+      return {
+        origin: [pos[0], pos[1], pos[2]],
+        dir: dir
+      };
+    },
     tick: function tick(_ref10) {
       var time = _ref10.time;
       // Delta time
@@ -10210,7 +10223,17 @@ var mapVal = function mapVal(value, min1, max1, min2, max2) {
   return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
 };
 
-var isMobile = !!navigator.userAgent.match(/(iPad)|(iPhone)|(iPod)|(android)|(webOS)/i);
+var isMobile = !!navigator.userAgent.match(/(iPad)|(iPhone)|(iPod)|(android)|(webOS)/i); // Gaze / current-artwork tuning (see current() below): a distance-weighted pick
+// with dual-cone hysteresis so the registered piece doesn't flicker between
+// neighbours as you pan, and a pitch gate so looking at floor/ceiling registers nothing.
+// Gaze / current-artwork tuning (see current() below). We raycast the exact
+// screen-centre ray against each visible painting's wall segment and take the
+// nearest hit — proper picking rather than a bearing heuristic.
+
+var GAZE_Y_MIN = 0.3; // vertical extent gate for a valid painting hit
+
+var GAZE_Y_MAX = 3.8;
+var GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
 
 function _mount(container) {
   var opts = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
@@ -10294,8 +10317,11 @@ function _mount(container) {
 
   var drawPainting = require('./painting')(regl);
 
-  var fps = require('./fps')(map, fovY, canvas, viewport);
+  var fps = require('./fps')(map, fovY, canvas, viewport); // Per-artwork presence glow intensity, keyed by image_id. Driven by the host
+  // via the `setGlow` handle; applied per painting each frame.
 
+
+  var glowMap = {};
   var context = regl({
     cull: {
       enable: true,
@@ -10337,32 +10363,58 @@ function _mount(container) {
       color: [0, 0, 0, 1],
       depth: 1
     });
+    var batch = placement.batch(); // Annotate each visible painting with its presence glow (0 when none).
+
+    for (var i = 0; i < batch.length; i++) {
+      batch[i].glow = glowMap[batch[i].image_id] || 0;
+    }
+
     context(function () {
       if (useReflexion) {
         reflexion(function () {
           drawMap();
-          drawPainting(placement.batch());
+          drawPainting(batch);
         });
       }
 
       drawMap();
-      drawPainting(placement.batch());
+      drawPainting(batch);
     });
     if (stats) stats.end();
-  }); // The visible painting most aligned with the camera forward vector (xz plane).
+  }); // The painting the viewer is looking at. Scores visible pieces by how centred
+  // they are (dot with the camera forward, xz plane) minus a distance penalty, so
+  // a near piece you're standing in front of wins over a far one dead-ahead. Uses
+  // dual-cone hysteresis: a piece must be within the tight ACQUIRE cone to newly
+  // register, but a registered piece is held until it drifts past the looser
+  // RELEASE cone — this kills the neighbour-to-neighbour flicker.
+
+  var lastCurrentId = null;
+  var lastGazeDebug = null; // diagnostics surfaced via gazeDebug()
 
   var current = function current() {
     var batch = placement.batch();
-    if (!batch || batch.length === 0) return null;
-    var px = fps.pos[0],
-        pz = fps.pos[2];
-    var fx = fps.forward[0],
-        fz = fps.forward[2];
-    var fl = Math.hypot(fx, fz) || 1;
-    fx /= fl;
-    fz /= fl;
+
+    if (!batch || batch.length === 0) {
+      lastCurrentId = null;
+      lastGazeDebug = {
+        hit: null,
+        count: 0
+      };
+      return null;
+    } // Exact screen-centre ray (same construction the touch-teleport uses).
+
+
+    var ray = fps.centerRay();
+    var ox = ray.origin[0],
+        oy = ray.origin[1],
+        oz = ray.origin[2];
+    var dx = ray.dir[0],
+        dy = ray.dir[1],
+        dz = ray.dir[2];
     var best = null,
-        bestDot = -Infinity;
+        bestT = Infinity,
+        held = null,
+        heldT = Infinity;
 
     var _iterator = _createForOfIteratorHelper(batch),
         _step;
@@ -10370,20 +10422,33 @@ function _mount(container) {
     try {
       for (_iterator.s(); !(_step = _iterator.n()).done;) {
         var p = _step.value;
-        var cx = (p.vseg[0][0] + p.vseg[1][0]) / 2;
-        var cz = (p.vseg[0][1] + p.vseg[1][1]) / 2;
-        var dx = cx - px,
-            dz = cz - pz;
-        var dl = Math.hypot(dx, dz) || 1;
-        dx /= dl;
-        dz /= dl;
-        var dot = dx * fx + dz * fz;
+        // Ray vs the painting's vertical wall segment (xz), then y-extent gate.
+        var a = p.vseg[0],
+            b = p.vseg[1];
+        var ex = b[0] - a[0],
+            ez = b[1] - a[1];
+        var denom = dx * ez - dz * ex;
+        if (Math.abs(denom) < 1e-6) continue;
+        var aox = a[0] - ox,
+            aoz = a[1] - oz;
+        var t = (aox * ez - aoz * ex) / denom; // distance along the ray
 
-        if (dot > bestDot) {
-          bestDot = dot;
+        var s = (aox * dz - aoz * dx) / denom; // param along the segment [0,1]
+
+        if (t <= 0 || s < 0 || s > 1) continue;
+        var yHit = oy + t * dy;
+        if (yHit < GAZE_Y_MIN || yHit > GAZE_Y_MAX) continue;
+
+        if (p.image_id === lastCurrentId) {
+          held = p;
+          heldT = t;
+        }
+
+        if (t < bestT) {
+          bestT = t;
           best = p;
         }
-      } // Require the piece to be reasonably in front of the viewer.
+      } // Light stickiness so the pick doesn't flip at the seam between two pieces.
 
     } catch (err) {
       _iterator.e(err);
@@ -10391,11 +10456,33 @@ function _mount(container) {
       _iterator.f();
     }
 
-    if (!best || bestDot < 0.5) return null;
+    var chosen = best,
+        chosenT = bestT;
+
+    if (held && heldT <= bestT * GAZE_STICKY) {
+      chosen = held;
+      chosenT = heldT;
+    }
+
+    lastGazeDebug = {
+      hit: chosen ? {
+        image_id: chosen.image_id,
+        t: +chosenT.toFixed(2)
+      } : null,
+      ray: [+dx.toFixed(2), +dy.toFixed(2), +dz.toFixed(2)],
+      count: batch.length
+    };
+
+    if (!chosen) {
+      lastCurrentId = null;
+      return null;
+    }
+
+    lastCurrentId = chosen.image_id;
     return {
-      image_id: best.image_id,
-      title: best.title,
-      artist_title: best.artist_title
+      image_id: chosen.image_id,
+      title: chosen.title,
+      artist_title: chosen.artist_title
     };
   };
 
@@ -10411,12 +10498,18 @@ function _mount(container) {
   return {
     canvas: canvas,
     current: current,
+    // Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
+    gazeDebug: function gazeDebug() {
+      return lastGazeDebug;
+    },
     camera: camera,
     setInputEnabled: function setInputEnabled(b) {
       return fps.setInputEnabled(b);
     },
-    // Slice 2 will drive a per-artwork rim-glow uniform through here.
-    setGlow: function setGlow(_glowByImageId) {},
+    // Presence glow: map of image_id → intensity (0..1). Applied per painting.
+    setGlow: function setGlow(glowByImageId) {
+      glowMap = glowByImageId || {};
+    },
     resize: resize,
     unmount: function unmount() {
       loop.cancel();
@@ -10443,6 +10536,9 @@ var gallery = {
   },
   current: function current() {
     return active ? active.current() : null;
+  },
+  gazeDebug: function gazeDebug() {
+    return active ? active.gazeDebug() : null;
   },
   camera: function camera() {
     return active ? active.camera() : null;
@@ -10975,7 +11071,7 @@ var text = require('./text');
 module.exports = function (regl) {
   var drawText = text.draw(regl);
   var painting = regl({
-    frag: "\n\tprecision lowp float;\n\tuniform sampler2D tex;\n\tvarying vec3 uv;\n\n\t// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/\n\t// This approximates the error function, needed for the gaussian integral\n\tvec4 erf(vec4 x) {\n\t\tvec4 s = sign(x), a = abs(x);\n\t\tx = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;\n\t\tx *= x;\n\t\treturn s - s / (x * x);\n\t}\n\n\t// Return the mask for the shadow of a box from lower to upper\n\tfloat boxShadow(vec2 lower, vec2 upper, vec2 point, float sigma) {\n\t\tvec4 query = vec4(point - lower, upper - point);\n\t\tvec4 integral = 0.5 + 0.5 * erf(query * (sqrt(0.5) / sigma));\n\t\treturn (integral.z - integral.x) * (integral.w - integral.y);\n\t}\n\n\tvoid main () {\n\t\tfloat frontMask = smoothstep(0.9, 1.0, uv.z);\n\t\tfloat paintingMask = step(0.001, uv.z);\n\t\tfloat shadowAlpha = boxShadow(vec2(.5), vec2(.7), abs(uv.xy-vec2(.5)), 0.02);\n\t\tfloat wrapping = 0.005 * sign(uv.x-.5) * (1.-uv.z);\n\t\tfloat sideShading = pow(uv.z/4.0, 0.1);\n\t\tvec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;\n\t\tcol *= mix(sideShading, 1., frontMask);\n\t\tgl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);\n\t}",
+    frag: "\n\tprecision lowp float;\n\tuniform sampler2D tex;\n\tuniform float glow;\n\tvarying vec3 uv;\n\n\t// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/\n\t// This approximates the error function, needed for the gaussian integral\n\tvec4 erf(vec4 x) {\n\t\tvec4 s = sign(x), a = abs(x);\n\t\tx = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;\n\t\tx *= x;\n\t\treturn s - s / (x * x);\n\t}\n\n\t// Return the mask for the shadow of a box from lower to upper\n\tfloat boxShadow(vec2 lower, vec2 upper, vec2 point, float sigma) {\n\t\tvec4 query = vec4(point - lower, upper - point);\n\t\tvec4 integral = 0.5 + 0.5 * erf(query * (sqrt(0.5) / sigma));\n\t\treturn (integral.z - integral.x) * (integral.w - integral.y);\n\t}\n\n\tvoid main () {\n\t\tfloat frontMask = smoothstep(0.9, 1.0, uv.z);\n\t\tfloat paintingMask = step(0.001, uv.z);\n\t\tfloat shadowAlpha = boxShadow(vec2(.5), vec2(.7), abs(uv.xy-vec2(.5)), 0.02);\n\t\tfloat wrapping = 0.005 * sign(uv.x-.5) * (1.-uv.z);\n\t\tfloat sideShading = pow(uv.z/4.0, 0.1);\n\t\tvec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;\n\t\tcol *= mix(sideShading, 1., frontMask);\n\t\t// Presence rim-glow: intensity scales with concurrent viewers.\n\t\tfloat glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));\n\t\tfloat glowRim = smoothstep(0.34, 0.5, glowEdge) * frontMask;\n\t\tcol += vec3(0.35, 0.75, 1.0) * glow * glowRim;\n\t\tgl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);\n\t}",
     vert: "\n\tprecision highp float;\n\tuniform mat4 proj, view, model;\n\tuniform float yScale;\n\tattribute vec3 pos;\n\tvarying vec3 uv;\n\tvoid main () {\n\t\tuv = pos;\n\t\tvec4 mpos = model * vec4(pos, 1);\n\t\tmpos.y *= yScale;\n\t\tgl_Position = proj * view * mpos;\n\t}",
     attributes: {
       pos: [0, 0, 1, //Front
@@ -10990,7 +11086,8 @@ module.exports = function (regl) {
     9, 11, 5, 7, 5, 11, 11, 10, 7, 6, 7, 10, 10, 8, 6, 4, 6, 8],
     uniforms: {
       model: regl.prop('model'),
-      tex: regl.prop('tex')
+      tex: regl.prop('tex'),
+      glow: regl.prop('glow')
     },
     blend: {
       enable: true,

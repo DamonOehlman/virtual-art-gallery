@@ -13,6 +13,16 @@ const mapVal = (value, min1, max1, min2, max2) =>
 
 const isMobile = !!navigator.userAgent.match(/(iPad)|(iPhone)|(iPod)|(android)|(webOS)/i);
 
+// Gaze / current-artwork tuning (see current() below): a distance-weighted pick
+// with dual-cone hysteresis so the registered piece doesn't flicker between
+// neighbours as you pan, and a pitch gate so looking at floor/ceiling registers nothing.
+// Gaze / current-artwork tuning (see current() below). We raycast the exact
+// screen-centre ray against each visible painting's wall segment and take the
+// nearest hit — proper picking rather than a bearing heuristic.
+const GAZE_Y_MIN = 0.3;   // vertical extent gate for a valid painting hit
+const GAZE_Y_MAX = 3.8;
+const GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
+
 function mount(container, opts = {}) {
 	const useReflexion = opts.reflexion !== undefined ? opts.reflexion : !isMobile;
 	const showStats = !!opts.stats;
@@ -130,27 +140,52 @@ function mount(container, opts = {}) {
 		if (stats) stats.end();
 	});
 
-	// The visible painting most aligned with the camera forward vector (xz plane).
+	// The painting the viewer is looking at. Scores visible pieces by how centred
+	// they are (dot with the camera forward, xz plane) minus a distance penalty, so
+	// a near piece you're standing in front of wins over a far one dead-ahead. Uses
+	// dual-cone hysteresis: a piece must be within the tight ACQUIRE cone to newly
+	// register, but a registered piece is held until it drifts past the looser
+	// RELEASE cone — this kills the neighbour-to-neighbour flicker.
+	let lastCurrentId = null;
+	let lastGazeDebug = null; // diagnostics surfaced via gazeDebug()
 	const current = () => {
 		const batch = placement.batch();
-		if (!batch || batch.length === 0) return null;
-		const px = fps.pos[0], pz = fps.pos[2];
-		let fx = fps.forward[0], fz = fps.forward[2];
-		const fl = Math.hypot(fx, fz) || 1;
-		fx /= fl; fz /= fl;
-		let best = null, bestDot = -Infinity;
+		if (!batch || batch.length === 0) { lastCurrentId = null; lastGazeDebug = { hit: null, count: 0 }; return null; }
+
+		// Exact screen-centre ray (same construction the touch-teleport uses).
+		const ray = fps.centerRay();
+		const ox = ray.origin[0], oy = ray.origin[1], oz = ray.origin[2];
+		const dx = ray.dir[0], dy = ray.dir[1], dz = ray.dir[2];
+
+		let best = null, bestT = Infinity, held = null, heldT = Infinity;
 		for (const p of batch) {
-			const cx = (p.vseg[0][0] + p.vseg[1][0]) / 2;
-			const cz = (p.vseg[0][1] + p.vseg[1][1]) / 2;
-			let dx = cx - px, dz = cz - pz;
-			const dl = Math.hypot(dx, dz) || 1;
-			dx /= dl; dz /= dl;
-			const dot = dx * fx + dz * fz;
-			if (dot > bestDot) { bestDot = dot; best = p; }
+			// Ray vs the painting's vertical wall segment (xz), then y-extent gate.
+			const a = p.vseg[0], b = p.vseg[1];
+			const ex = b[0] - a[0], ez = b[1] - a[1];
+			const denom = dx * ez - dz * ex;
+			if (Math.abs(denom) < 1e-6) continue;
+			const aox = a[0] - ox, aoz = a[1] - oz;
+			const t = (aox * ez - aoz * ex) / denom; // distance along the ray
+			const s = (aox * dz - aoz * dx) / denom; // param along the segment [0,1]
+			if (t <= 0 || s < 0 || s > 1) continue;
+			const yHit = oy + t * dy;
+			if (yHit < GAZE_Y_MIN || yHit > GAZE_Y_MAX) continue;
+			if (p.image_id === lastCurrentId) { held = p; heldT = t; }
+			if (t < bestT) { bestT = t; best = p; }
 		}
-		// Require the piece to be reasonably in front of the viewer.
-		if (!best || bestDot < 0.5) return null;
-		return { image_id: best.image_id, title: best.title, artist_title: best.artist_title };
+
+		// Light stickiness so the pick doesn't flip at the seam between two pieces.
+		let chosen = best, chosenT = bestT;
+		if (held && heldT <= bestT * GAZE_STICKY) { chosen = held; chosenT = heldT; }
+
+		lastGazeDebug = {
+			hit: chosen ? { image_id: chosen.image_id, t: +chosenT.toFixed(2) } : null,
+			ray: [+dx.toFixed(2), +dy.toFixed(2), +dz.toFixed(2)],
+			count: batch.length
+		};
+		if (!chosen) { lastCurrentId = null; return null; }
+		lastCurrentId = chosen.image_id;
+		return { image_id: chosen.image_id, title: chosen.title, artist_title: chosen.artist_title };
 	};
 
 	const camera = () => ({
@@ -163,6 +198,8 @@ function mount(container, opts = {}) {
 	return {
 		canvas,
 		current,
+		// Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
+		gazeDebug: () => lastGazeDebug,
 		camera,
 		setInputEnabled: (b) => fps.setInputEnabled(b),
 		// Presence glow: map of image_id → intensity (0..1). Applied per painting.
@@ -190,6 +227,7 @@ const gallery = {
 	},
 	isMounted: () => !!active,
 	current: () => (active ? active.current() : null),
+	gazeDebug: () => (active ? active.gazeDebug() : null),
 	camera: () => (active ? active.camera() : null),
 	setInputEnabled: (b) => { if (active) active.setInputEnabled(b); },
 	setGlow: (m) => { if (active) active.setGlow(m); },

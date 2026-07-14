@@ -68,7 +68,9 @@ module.exports = (regl, {placements, getAreaIndex}) => {
         mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
         mat4.scale(textmodel, textmodel, [2,2,2]);
         mat4.rotateY(textmodel, textmodel, -angle);
-        batch.push({ ...p, vseg, angle, model, textmodel, text, width, textGen:null });
+        // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
+        // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
+        batch.push({ ...p, vseg, angle, model, textmodel, text, width, yLo: 2.1 - globalScale, yHi: 2.1 + globalScale, textGen:null });
     };
     // Fetch the first textures
     texture.fetch(regl, 20, dynamicRes, loadPainting, () => fetching = false);

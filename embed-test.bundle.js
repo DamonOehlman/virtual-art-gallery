@@ -10235,6 +10235,49 @@ var GAZE_Y_MIN = 0.3; // vertical extent gate for a valid painting hit
 var GAZE_Y_MAX = 3.8;
 var GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
 
+var GAZE_WALL_EPS = 0.5; // a wall nearer than (paintingHit - this) occludes the piece
+// Nearest wall-segment hit along the screen-centre ray (xz plane), used to reject
+// painting hits that are behind a wall. Walls are gathered from the grid along the
+// ray, mirroring the touch-teleport raycast's sampling.
+
+var nearestWallHit = function nearestWallHit(mapObj, ox, oz, dx, dz, maxT) {
+  var sx = dx,
+      sz = dz;
+  var sl = Math.hypot(sx, sz) || 1;
+  sx /= sl;
+  sz /= sl;
+  var walls = [];
+  var STEP = 4;
+
+  for (var d = 0; d <= maxT + STEP; d += STEP) {
+    var segs = mapObj.getGridSegments(ox + sx * d, oz + sz * d);
+
+    for (var i = 0; i < segs.length; i++) {
+      walls.push(segs[i]);
+    }
+  }
+
+  var minT = null;
+
+  for (var _i = 0, _walls = walls; _i < _walls.length; _i++) {
+    var seg = _walls[_i];
+    var a = seg[0],
+        b = seg[1];
+    var ex = b[0] - a[0],
+        ez = b[1] - a[1];
+    var denom = dx * ez - dz * ex;
+    if (Math.abs(denom) < 1e-6) continue;
+    var aox = a[0] - ox,
+        aoz = a[1] - oz;
+    var t = (aox * ez - aoz * ex) / denom;
+    var s = (aox * dz - aoz * dx) / denom;
+    if (t <= 0 || s < 0 || s > 1) continue;
+    if (minT === null || t < minT) minT = t;
+  }
+
+  return minT;
+};
+
 function _mount(container) {
   var opts = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
   var useReflexion = opts.reflexion !== undefined ? opts.reflexion : !isMobile;
@@ -10436,8 +10479,11 @@ function _mount(container) {
         var s = (aox * dz - aoz * dx) / denom; // param along the segment [0,1]
 
         if (t <= 0 || s < 0 || s > 1) continue;
-        var yHit = oy + t * dy;
-        if (yHit < GAZE_Y_MIN || yHit > GAZE_Y_MAX) continue;
+        var yHit = oy + t * dy; // Gate against the piece's real vertical extent (falls back to a loose band).
+
+        var yLo = p.yLo !== undefined ? p.yLo : GAZE_Y_MIN;
+        var yHi = p.yHi !== undefined ? p.yHi : GAZE_Y_MAX;
+        if (yHit < yLo || yHit > yHi) continue;
 
         if (p.image_id === lastCurrentId) {
           held = p;
@@ -10462,6 +10508,18 @@ function _mount(container) {
     if (held && heldT <= bestT * GAZE_STICKY) {
       chosen = held;
       chosenT = heldT;
+    } // Occlusion: reject the hit if a wall blocks the ray nearer than the piece.
+
+
+    var occludedBy = null;
+
+    if (chosen) {
+      var wallT = nearestWallHit(map, ox, oz, dx, dz, chosenT);
+
+      if (wallT !== null && wallT < chosenT - GAZE_WALL_EPS) {
+        occludedBy = wallT;
+        chosen = null;
+      }
     }
 
     lastGazeDebug = {
@@ -10469,6 +10527,7 @@ function _mount(container) {
         image_id: chosen.image_id,
         t: +chosenT.toFixed(2)
       } : null,
+      occludedBy: occludedBy !== null ? +occludedBy.toFixed(2) : null,
       ray: [+dx.toFixed(2), +dy.toFixed(2), +dz.toFixed(2)],
       count: batch.length
     };
@@ -11190,7 +11249,9 @@ module.exports = function (regl, _ref2) {
     var textmodel = [];
     mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
     mat4.scale(textmodel, textmodel, [2, 2, 2]);
-    mat4.rotateY(textmodel, textmodel, -angle);
+    mat4.rotateY(textmodel, textmodel, -angle); // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
+    // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
+
     batch.push(_objectSpread(_objectSpread({}, p), {}, {
       vseg: vseg,
       angle: angle,
@@ -11198,6 +11259,8 @@ module.exports = function (regl, _ref2) {
       textmodel: textmodel,
       text: text,
       width: width,
+      yLo: 2.1 - globalScale,
+      yHi: 2.1 + globalScale,
       textGen: null
     }));
   }; // Fetch the first textures

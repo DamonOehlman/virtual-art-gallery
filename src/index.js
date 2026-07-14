@@ -22,6 +22,35 @@ const isMobile = !!navigator.userAgent.match(/(iPad)|(iPhone)|(iPod)|(android)|(
 const GAZE_Y_MIN = 0.3;   // vertical extent gate for a valid painting hit
 const GAZE_Y_MAX = 3.8;
 const GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
+const GAZE_WALL_EPS = 0.5; // a wall nearer than (paintingHit - this) occludes the piece
+
+// Nearest wall-segment hit along the screen-centre ray (xz plane), used to reject
+// painting hits that are behind a wall. Walls are gathered from the grid along the
+// ray, mirroring the touch-teleport raycast's sampling.
+const nearestWallHit = (mapObj, ox, oz, dx, dz, maxT) => {
+	let sx = dx, sz = dz;
+	const sl = Math.hypot(sx, sz) || 1;
+	sx /= sl; sz /= sl;
+	const walls = [];
+	const STEP = 4;
+	for (let d = 0; d <= maxT + STEP; d += STEP) {
+		const segs = mapObj.getGridSegments(ox + sx * d, oz + sz * d);
+		for (let i = 0; i < segs.length; i++) walls.push(segs[i]);
+	}
+	let minT = null;
+	for (const seg of walls) {
+		const a = seg[0], b = seg[1];
+		const ex = b[0] - a[0], ez = b[1] - a[1];
+		const denom = dx * ez - dz * ex;
+		if (Math.abs(denom) < 1e-6) continue;
+		const aox = a[0] - ox, aoz = a[1] - oz;
+		const t = (aox * ez - aoz * ex) / denom;
+		const s = (aox * dz - aoz * dx) / denom;
+		if (t <= 0 || s < 0 || s > 1) continue;
+		if (minT === null || t < minT) minT = t;
+	}
+	return minT;
+};
 
 function mount(container, opts = {}) {
 	const useReflexion = opts.reflexion !== undefined ? opts.reflexion : !isMobile;
@@ -169,7 +198,10 @@ function mount(container, opts = {}) {
 			const s = (aox * dz - aoz * dx) / denom; // param along the segment [0,1]
 			if (t <= 0 || s < 0 || s > 1) continue;
 			const yHit = oy + t * dy;
-			if (yHit < GAZE_Y_MIN || yHit > GAZE_Y_MAX) continue;
+			// Gate against the piece's real vertical extent (falls back to a loose band).
+			const yLo = (p.yLo !== undefined) ? p.yLo : GAZE_Y_MIN;
+			const yHi = (p.yHi !== undefined) ? p.yHi : GAZE_Y_MAX;
+			if (yHit < yLo || yHit > yHi) continue;
 			if (p.image_id === lastCurrentId) { held = p; heldT = t; }
 			if (t < bestT) { bestT = t; best = p; }
 		}
@@ -178,8 +210,19 @@ function mount(container, opts = {}) {
 		let chosen = best, chosenT = bestT;
 		if (held && heldT <= bestT * GAZE_STICKY) { chosen = held; chosenT = heldT; }
 
+		// Occlusion: reject the hit if a wall blocks the ray nearer than the piece.
+		let occludedBy = null;
+		if (chosen) {
+			const wallT = nearestWallHit(map, ox, oz, dx, dz, chosenT);
+			if (wallT !== null && wallT < chosenT - GAZE_WALL_EPS) {
+				occludedBy = wallT;
+				chosen = null;
+			}
+		}
+
 		lastGazeDebug = {
 			hit: chosen ? { image_id: chosen.image_id, t: +chosenT.toFixed(2) } : null,
+			occludedBy: occludedBy !== null ? +occludedBy.toFixed(2) : null,
 			ray: [+dx.toFixed(2), +dy.toFixed(2), +dz.toFixed(2)],
 			count: batch.length
 		};

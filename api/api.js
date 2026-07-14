@@ -1,7 +1,8 @@
-'strict mode';
+"strict mode";
 
 module.exports = {
-    default: "artic",
-    artic: require("./artic"),
-    local: require("./local")
+  default: "cnft",
+  artic: require("./artic"),
+  cnft: require("./cnft"),
+  local: require("./local"),
 };

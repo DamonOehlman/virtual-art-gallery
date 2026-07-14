@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Gallery embed test</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #1b1b1f; color: #eee; }
+    header { padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { padding: 6px 12px; cursor: pointer; }
+    #stage {
+      /* Deliberately a SUB-REGION, not fullscreen, to prove embedding. */
+      width: 640px; height: 400px; margin: 12px 14px;
+      border: 2px solid #4c8; border-radius: 6px; overflow: hidden; background: #000;
+    }
+    #readout { padding: 8px 14px; font: 12px/1.5 ui-monospace, monospace; white-space: pre; color: #9cf; }
+    input { padding: 5px 8px; }
+    .mode { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <!-- Opt out of the gallery's standalone auto-mount so we can mount manually. -->
+  <script>window.__GALLERY_MANUAL__ = true;</script>
+
+  <header>
+    <span class="mode">mode: <span id="mode">—</span></span>
+    <button id="explore">Explore (input ON)</button>
+    <button id="menu">Menu (input OFF)</button>
+    <button id="resize">Toggle stage size (test ResizeObserver)</button>
+    <label>host input (type WASD here in Menu mode): <input id="host" placeholder="should work in Menu mode only"></label>
+  </header>
+
+  <div id="stage"></div>
+  <div id="readout">not mounted</div>
+
+  <script src="embed-test.bundle.js"></script>
+  <script>
+    const stage = document.getElementById('stage');
+    const modeEl = document.getElementById('mode');
+    const readout = document.getElementById('readout');
+
+    // Mount the gallery into the sub-region div (this is exactly what the Leptos
+    // shell will do via web-sys).
+    window.gallery.mount(stage, { stats: false });
+
+    function setMode(explore) {
+      window.gallery.setInputEnabled(explore);
+      modeEl.textContent = explore ? 'EXPLORE (click stage to lock pointer, WASD to move)' : 'MENU (host UI usable, WASD types in the input)';
+    }
+    document.getElementById('explore').onclick = () => setMode(true);
+    document.getElementById('menu').onclick = () => setMode(false);
+
+    let big = false;
+    document.getElementById('resize').onclick = () => {
+      big = !big;
+      stage.style.width = big ? '900px' : '640px';
+      stage.style.height = big ? '560px' : '400px';
+      // ResizeObserver inside the gallery should pick this up; no manual call needed,
+      // but exercise the explicit API too:
+      window.gallery.resize();
+    };
+
+    // Start in menu mode so the page is usable until the user opts into exploring.
+    setMode(false);
+
+    // Live readout of the driver surface the shell will consume.
+    setInterval(() => {
+      const c = window.gallery.current();
+      const cam = window.gallery.camera();
+      readout.textContent =
+        'current(): ' + (c ? JSON.stringify(c) : 'null') + '\n' +
+        'camera():  ' + (cam ? `pos=[${cam.pos.map(n=>n.toFixed(1))}] yaw=${cam.yaw.toFixed(2)} pitch=${cam.pitch.toFixed(2)}` : 'null');
+    }, 400);
+  </script>
+</body>
+</html>

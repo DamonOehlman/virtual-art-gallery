@@ -9,6 +9,7 @@ module.exports = (regl) => {
 			frag: `
 	precision lowp float;
 	uniform sampler2D tex;
+	uniform float glow;
 	varying vec3 uv;
 
 	// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/
@@ -35,6 +36,10 @@ module.exports = (regl) => {
 		float sideShading = pow(uv.z/4.0, 0.1);
 		vec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;
 		col *= mix(sideShading, 1., frontMask);
+		// Presence rim-glow: intensity scales with concurrent viewers.
+		float glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+		float glowRim = smoothstep(0.34, 0.5, glowEdge) * frontMask;
+		col += vec3(0.35, 0.75, 1.0) * glow * glowRim;
 		gl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);
 	}`,
 			vert: `
@@ -81,7 +86,8 @@ module.exports = (regl) => {
 
 			uniforms: {
 				model: regl.prop('model'),
-				tex: regl.prop('tex')
+				tex: regl.prop('tex'),
+				glow: regl.prop('glow')
 			},
 
 			blend: {

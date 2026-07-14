@@ -1,8 +1,14 @@
 'strict mode';
 
 const api = require('../api/api');
-const selectedApi = new URLSearchParams(window.location.search).get("api");
-const dataAccess = api[selectedApi] || api[api.default];
+const params = new URLSearchParams(window.location.search);
+// A ?source=listed:<policy> / collection:<policy> selects the live CO source;
+// otherwise fall back to ?api=<provider> or the default (featured exhibition).
+const source = params.get("source") || "";
+const selectedApi = params.get("api");
+const dataAccess = /^(listed|collection):/.test(source)
+	? api.co
+	: (api[selectedApi] || api[api.default]);
 const text = require('./text');
 
 let paintingCache = {};

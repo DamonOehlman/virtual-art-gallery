@@ -1,6 +1,7 @@
 'use strict';
 const texture = require('./image');
 const mat4 = require('gl-mat4');
+const vec3 = require('gl-vec3');
 
 const renderDist = 20;
 const loadDist = 20;
@@ -68,9 +69,35 @@ module.exports = (regl, {placements, getAreaIndex}) => {
         mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
         mat4.scale(textmodel, textmodel, [2,2,2]);
         mat4.rotateY(textmodel, textmodel, -angle);
+        // Optional "for sale" ticket, placed ON the artwork at its bottom-right
+        // corner like a price sticker in a physical gallery. Corners come from
+        // the painting's own model matrix, so this works on every wall
+        // orientation.
+        let tag = null, tagmodel = null;
+        if (p.tagGen) {
+            const TICKET_W = 0.34, TICKET_H = 0.17, TILT = -0.05, INSET = 0.05;
+            const c0 = vec3.transformMat4([], [0, 0, 1], model); // front bottom-left corner
+            const c1 = vec3.transformMat4([], [1, 0, 1], model); // front bottom-right corner
+            const b1 = vec3.transformMat4([], [1, 0, 0], model); // c1's back counterpart
+            const along = vec3.normalize([], vec3.sub([], c1, c0)); // along the wall, left→right
+            const out = vec3.normalize([], vec3.sub([], c1, b1));   // out of the wall
+            tagmodel = [];
+            // Pivot at the card's bottom-right, inset from the artwork corner and
+            // lifted just off the face; the card extends up-left onto the image.
+            mat4.fromTranslation(tagmodel, [
+                c1[0] - along[0] * INSET + out[0] * 0.01,
+                c1[1] + INSET,
+                c1[2] - along[2] * INSET + out[2] * 0.01
+            ]);
+            mat4.rotateY(tagmodel, tagmodel, -angle);
+            mat4.rotateZ(tagmodel, tagmodel, TILT);
+            mat4.translate(tagmodel, tagmodel, [-TICKET_W, 0, 0]);
+            mat4.scale(tagmodel, tagmodel, [TICKET_W, TICKET_H, 1]);
+            tag = p.tagGen();
+        }
         // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
         // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
-        batch.push({ ...p, vseg, angle, model, textmodel, text, width, yLo: 2.1 - globalScale, yHi: 2.1 + globalScale, textGen:null });
+        batch.push({ ...p, vseg, angle, model, textmodel, text, tag, tagmodel, width, yLo: 2.1 - globalScale, yHi: 2.1 + globalScale, textGen:null, tagGen:null });
     };
     // Fetch the first textures
     texture.fetch(regl, 20, dynamicRes, loadPainting, () => fetching = false);

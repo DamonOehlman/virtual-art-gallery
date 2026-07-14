@@ -1,6 +1,7 @@
 'use strict';
 
 const text = require('./text');
+const ticket = require('./ticket');
 
 module.exports = (regl) => {
 	const drawText = text.draw(regl);
@@ -101,8 +102,15 @@ module.exports = (regl) => {
 				color: [0, 0, 0, 0]
 			}
 		});
+	const drawTicket = ticket.draw(regl);
+	const TITLE_COLOR = [0, 0, 0, 1];
 	return function (batch) {
 		painting(batch);
-		drawText(batch);
+		drawText(batch.map(p => ({ text: p.text, textmodel: p.textmodel, textcolor: TITLE_COLOR })));
+		// "For sale" swing tickets on listed pieces.
+		const tags = batch
+			.filter(p => p.tag)
+			.map(p => ({ tex: p.tag, model: p.tagmodel }));
+		if (tags.length) drawTicket(tags);
 	}
 };

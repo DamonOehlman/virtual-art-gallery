@@ -282,7 +282,9 @@ module.exports = {
             case 4:
               blob = _context2.sent;
               return _context2.abrupt("return", {
-                title: obj.title + (obj.artist_title ? " — " + obj.artist_title : ""),
+                // Price is NOT merged into the title — listed pieces get a separate gold
+                // "FOR SALE · <price>" placard line (see image.js tagGen).
+                title: obj.title,
                 image: blob
               });
 
@@ -10151,6 +10153,8 @@ var dataAccess = /^(listed|collection):/.test(source) ? api.co : api[selectedApi
 
 var text = require('./text');
 
+var ticket = require('./ticket');
+
 var paintingCache = {};
 var unusedTextures = [];
 var dynamicQualThreshold = 2;
@@ -10182,7 +10186,7 @@ function loadImage(_x, _x2, _x3) {
 
 function _loadImage() {
   _loadImage = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee(regl, p, res) {
-    var image, title, data;
+    var image, title, data, tagGen;
     return _regenerator["default"].wrap(function _callee$(_context) {
       while (1) {
         switch (_context.prev = _context.next) {
@@ -10235,6 +10239,10 @@ function _loadImage() {
             return _context.abrupt("return", _context.t1);
 
           case 23:
+            // Listed pieces get a swing ticket hanging off the frame corner (price tag).
+            tagGen = p.listed && p.artist_title ? function () {
+              return ticket.init(unusedTextures.pop() || regl.texture, p.artist_title);
+            } : null;
             return _context.abrupt("return", [(unusedTextures.pop() || regl.texture)({
               data: resizeCanvas,
               min: 'mipmap',
@@ -10243,9 +10251,9 @@ function _loadImage() {
               flipY: true
             }), function (width) {
               return text.init(unusedTextures.pop() || regl.texture, title, width);
-            }, image.width / image.height]);
+            }, image.width / image.height, tagGen]);
 
-          case 24:
+          case 25:
           case "end":
             return _context.stop();
         }
@@ -10272,14 +10280,16 @@ module.exports = {
 
         paintingCache[p.image_id] = p;
         loadImage(regl, p, res).then(function (_ref) {
-          var _ref2 = (0, _slicedToArray2["default"])(_ref, 3),
+          var _ref2 = (0, _slicedToArray2["default"])(_ref, 4),
               tex = _ref2[0],
               textGen = _ref2[1],
-              aspect = _ref2[2];
+              aspect = _ref2[2],
+              tagGen = _ref2[3];
 
           cbOne(_objectSpread(_objectSpread({}, p), {}, {
             tex: tex,
             textGen: textGen,
+            tagGen: tagGen,
             aspect: aspect
           }));
           if (--count === 0) cbAll();
@@ -10292,13 +10302,15 @@ module.exports = {
     if (p.tex || p.loading) return;
     p.loading = true;
     loadImage(regl, p, res).then(function (_ref3) {
-      var _ref4 = (0, _slicedToArray2["default"])(_ref3, 2),
+      var _ref4 = (0, _slicedToArray2["default"])(_ref3, 4),
           tex = _ref4[0],
-          textGen = _ref4[1];
+          textGen = _ref4[1],
+          tagGen = _ref4[3];
 
       p.loading = false;
       p.tex = tex;
       p.text = textGen(p.width);
+      p.tag = tagGen ? tagGen() : undefined;
     });
   },
   unload: function unload(p) {
@@ -10311,10 +10323,15 @@ module.exports = {
       unusedTextures.push(p.text);
       p.text = undefined;
     }
+
+    if (p.tag) {
+      unusedTextures.push(p.tag);
+      p.tag = undefined;
+    }
   }
 };
 
-},{"../api/api":1,"./text":137,"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/regenerator":20}],132:[function(require,module,exports){
+},{"../api/api":1,"./text":137,"./ticket":138,"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/regenerator":20}],132:[function(require,module,exports){
 'use strict'; // Virtual Art Gallery — embeddable entry point.
 //
 // Historically this module ran fullscreen on load and owned `document.body`.
@@ -11241,6 +11258,8 @@ module.exports = function (regl, data, useReflexion) {
 
 var text = require('./text');
 
+var ticket = require('./ticket');
+
 module.exports = function (regl) {
   var drawText = text.draw(regl);
   var painting = regl({
@@ -11273,13 +11292,31 @@ module.exports = function (regl) {
       color: [0, 0, 0, 0]
     }
   });
+  var drawTicket = ticket.draw(regl);
+  var TITLE_COLOR = [0, 0, 0, 1];
   return function (batch) {
     painting(batch);
-    drawText(batch);
+    drawText(batch.map(function (p) {
+      return {
+        text: p.text,
+        textmodel: p.textmodel,
+        textcolor: TITLE_COLOR
+      };
+    })); // "For sale" swing tickets on listed pieces.
+
+    var tags = batch.filter(function (p) {
+      return p.tag;
+    }).map(function (p) {
+      return {
+        tex: p.tag,
+        model: p.tagmodel
+      };
+    });
+    if (tags.length) drawTicket(tags);
   };
 };
 
-},{"./text":137}],136:[function(require,module,exports){
+},{"./text":137,"./ticket":138}],136:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -11293,6 +11330,8 @@ function _objectSpread(target) { for (var i = 1; i < arguments.length; i++) { va
 var texture = require('./image');
 
 var mat4 = require('gl-mat4');
+
+var vec3 = require('gl-vec3');
 
 var renderDist = 20;
 var loadDist = 20;
@@ -11363,8 +11402,41 @@ module.exports = function (regl, _ref2) {
     var textmodel = [];
     mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
     mat4.scale(textmodel, textmodel, [2, 2, 2]);
-    mat4.rotateY(textmodel, textmodel, -angle); // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
+    mat4.rotateY(textmodel, textmodel, -angle); // Optional "for sale" ticket, placed ON the artwork at its bottom-right
+    // corner like a price sticker in a physical gallery. Corners come from
+    // the painting's own model matrix, so this works on every wall
+    // orientation.
+
+    var tag = null,
+        tagmodel = null;
+
+    if (p.tagGen) {
+      var TICKET_W = 0.34,
+          TICKET_H = 0.17,
+          TILT = -0.05,
+          INSET = 0.05;
+      var c0 = vec3.transformMat4([], [0, 0, 1], model); // front bottom-left corner
+
+      var c1 = vec3.transformMat4([], [1, 0, 1], model); // front bottom-right corner
+
+      var b1 = vec3.transformMat4([], [1, 0, 0], model); // c1's back counterpart
+
+      var along = vec3.normalize([], vec3.sub([], c1, c0)); // along the wall, left→right
+
+      var out = vec3.normalize([], vec3.sub([], c1, b1)); // out of the wall
+
+      tagmodel = []; // Pivot at the card's bottom-right, inset from the artwork corner and
+      // lifted just off the face; the card extends up-left onto the image.
+
+      mat4.fromTranslation(tagmodel, [c1[0] - along[0] * INSET + out[0] * 0.01, c1[1] + INSET, c1[2] - along[2] * INSET + out[2] * 0.01]);
+      mat4.rotateY(tagmodel, tagmodel, -angle);
+      mat4.rotateZ(tagmodel, tagmodel, TILT);
+      mat4.translate(tagmodel, tagmodel, [-TICKET_W, 0, 0]);
+      mat4.scale(tagmodel, tagmodel, [TICKET_W, TICKET_H, 1]);
+      tag = p.tagGen();
+    } // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
     // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
+
 
     batch.push(_objectSpread(_objectSpread({}, p), {}, {
       vseg: vseg,
@@ -11372,10 +11444,13 @@ module.exports = function (regl, _ref2) {
       model: model,
       textmodel: textmodel,
       text: text,
+      tag: tag,
+      tagmodel: tagmodel,
       width: width,
       yLo: 2.1 - globalScale,
       yHi: 2.1 + globalScale,
-      textGen: null
+      textGen: null,
+      tagGen: null
     }));
   }; // Fetch the first textures
 
@@ -11428,7 +11503,7 @@ module.exports = function (regl, _ref2) {
   };
 };
 
-},{"./image":131,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"gl-mat4":41}],137:[function(require,module,exports){
+},{"./image":131,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"gl-mat4":41,"gl-vec3":74}],137:[function(require,module,exports){
 "use strict";
 'strict mode';
 
@@ -11505,14 +11580,101 @@ module.exports = {
   },
   draw: function draw(regl) {
     return regl({
-      frag: "\n            precision mediump float;\n            uniform sampler2D tex;\n            varying vec2 uv;\n        \n            void main () {\n                float c = texture2D(tex, uv).r;\n                gl_FragColor = vec4(0,0,0, c);\n            }",
+      frag: "\n            precision mediump float;\n            uniform sampler2D tex;\n            uniform vec4 textcolor;\n            varying vec2 uv;\n        \n            void main () {\n                float c = texture2D(tex, uv).r;\n                gl_FragColor = vec4(textcolor.rgb, c * textcolor.a);\n            }",
       vert: "\n            precision highp float;\n            uniform mat4 proj, view, model;\n            uniform float yScale;\n            attribute vec2 pos;\n            varying vec2 uv;\n            void main () {\n                uv = pos;\n                vec4 mpos = model * vec4(pos, 0.001, 1);\n                mpos.y *= yScale;\n                gl_Position = proj * view * mpos;\n            }",
       attributes: {
         pos: [0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0]
       },
       uniforms: {
         model: regl.prop('textmodel'),
-        tex: regl.prop('text')
+        tex: regl.prop('text'),
+        textcolor: regl.prop('textcolor')
+      },
+      count: 6,
+      blend: {
+        enable: true,
+        func: {
+          srcRGB: 'src alpha',
+          srcAlpha: 'one minus src alpha',
+          dstRGB: 'one minus src alpha',
+          dstAlpha: 1
+        },
+        color: [0, 0, 0, 0]
+      }
+    });
+  }
+};
+
+},{}],138:[function(require,module,exports){
+"use strict";
+'strict mode'; // "For sale" price ticket — a small card placed on the artwork's bottom-right
+// corner, like a price sticker in a physical gallery. Drawn into a canvas
+// texture and rendered on a small tilted quad (see placement.js).
+//
+// Canvas dimensions MUST be powers of two: the texture uses mipmaps, and WebGL1
+// treats mipmapped non-POT textures as incomplete (samples opaque black).
+
+var W = 512,
+    H = 256;
+var ticketCanvas = document.createElement('canvas');
+ticketCanvas.width = W;
+ticketCanvas.height = H;
+var ctx = ticketCanvas.getContext('2d');
+
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+module.exports = {
+  init: function init(texture, priceText) {
+    ctx.clearRect(0, 0, W, H); // Card, full bleed with rounded corners and a gold border.
+
+    roundRect(ctx, 8, 8, W - 16, H - 16, 24);
+    ctx.fillStyle = '#f7f2e7';
+    ctx.fill();
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = '#b8860b';
+    ctx.stroke(); // Copy.
+
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#9a7b1e';
+    ctx.font = 'bold 44px Verdana';
+    ctx.fillText('FOR SALE', 40, 96);
+    ctx.fillStyle = '#2b2b2b'; // Auto-fit: shrink from 96px until the price fits the card width.
+
+    var maxTextWidth = W - 80;
+    var size = 96;
+    ctx.font = "bold ".concat(size, "px Verdana");
+
+    while (size > 40 && ctx.measureText(priceText).width > maxTextWidth) {
+      size -= 4;
+      ctx.font = "bold ".concat(size, "px Verdana");
+    }
+
+    ctx.fillText(priceText, 40, 212);
+    return texture({
+      data: ticketCanvas,
+      min: 'mipmap',
+      mipmap: 'nice',
+      flipY: true
+    });
+  },
+  draw: function draw(regl) {
+    return regl({
+      frag: "\n\t\t\tprecision mediump float;\n\t\t\tuniform sampler2D tex;\n\t\t\tvarying vec2 uv;\n\t\t\tvoid main () {\n\t\t\t\tvec4 c = texture2D(tex, uv);\n\t\t\t\tif (c.a < 0.01) discard;\n\t\t\t\tgl_FragColor = c;\n\t\t\t}",
+      vert: "\n\t\t\tprecision highp float;\n\t\t\tuniform mat4 proj, view, model;\n\t\t\tuniform float yScale;\n\t\t\tattribute vec2 pos;\n\t\t\tvarying vec2 uv;\n\t\t\tvoid main () {\n\t\t\t\tuv = pos;\n\t\t\t\tvec4 mpos = model * vec4(pos, 0.0, 1);\n\t\t\t\tmpos.y *= yScale;\n\t\t\t\tgl_Position = proj * view * mpos;\n\t\t\t}",
+      attributes: {
+        pos: [0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0]
+      },
+      uniforms: {
+        model: regl.prop('model'),
+        tex: regl.prop('tex')
       },
       count: 6,
       blend: {

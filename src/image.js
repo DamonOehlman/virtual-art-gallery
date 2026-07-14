@@ -10,6 +10,7 @@ const dataAccess = /^(listed|collection):/.test(source)
 	? api.co
 	: (api[selectedApi] || api[api.default]);
 const text = require('./text');
+const ticket = require('./ticket');
 
 let paintingCache = {};
 let unusedTextures = [];
@@ -56,6 +57,11 @@ async function loadImage(regl, p, res) {
 		return res == "high" ? await loadImage(regl, p, "low") : emptyImage(regl);
 	}
 
+	// Listed pieces get a swing ticket hanging off the frame corner (price tag).
+	const tagGen = (p.listed && p.artist_title)
+		? () => ticket.init((unusedTextures.pop() || regl.texture), p.artist_title)
+		: null;
+
 	return [(unusedTextures.pop() || regl.texture)({
 			data: resizeCanvas,
 			min: 'mipmap',
@@ -64,7 +70,8 @@ async function loadImage(regl, p, res) {
 			flipY: true
 		}),
 		width=>text.init((unusedTextures.pop() || regl.texture), title, width),
-		image.width / image.height
+		image.width / image.height,
+		tagGen
 	];
 }
 
@@ -80,8 +87,8 @@ module.exports = {
 					return;
 				}
 				paintingCache[p.image_id] = p;
-				loadImage(regl, p, res).then(([tex, textGen, aspect]) => {
-					cbOne({ ...p, tex, textGen, aspect });
+				loadImage(regl, p, res).then(([tex, textGen, aspect, tagGen]) => {
+					cbOne({ ...p, tex, textGen, tagGen, aspect });
 					if (--count === 0)
 						cbAll();
 				});
@@ -92,10 +99,11 @@ module.exports = {
 		if (p.tex || p.loading)
 			return;
 		p.loading = true;
-		loadImage(regl, p, res).then(([tex, textGen]) => {
+		loadImage(regl, p, res).then(([tex, textGen, , tagGen]) => {
 			p.loading = false;
 			p.tex = tex;
 			p.text = textGen(p.width);
+			p.tag = tagGen ? tagGen() : undefined;
 		});
 	},
 	unload: (p) => {
@@ -106,6 +114,10 @@ module.exports = {
 		if (p.text) {
 			unusedTextures.push(p.text);
 			p.text = undefined;
+		}
+		if (p.tag) {
+			unusedTextures.push(p.tag);
+			p.tag = undefined;
 		}
 	}
 };

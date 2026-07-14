@@ -35,7 +35,9 @@ module.exports = {
     const url = `${iiifBase}/iiif/3/${obj.image_id}/full/${width},/0/default.jpg`;
     const blob = await fetch(url).then((r) => r.blob());
     return {
-      title: obj.title + (obj.artist_title ? " — " + obj.artist_title : ""),
+      // Price is NOT merged into the title — listed pieces get a separate gold
+      // "FOR SALE · <price>" placard line (see image.js tagGen).
+      title: obj.title,
       image: blob,
     };
   },

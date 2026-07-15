@@ -37,10 +37,14 @@ module.exports = (regl) => {
 		float sideShading = pow(uv.z/4.0, 0.1);
 		vec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;
 		col *= mix(sideShading, 1., frontMask);
-		// Presence rim-glow: intensity scales with concurrent viewers.
+		// Attention highlight: light the FRAME, not the art. Presence intensity
+		// (concurrent viewers) warms the beveled contour plus a thin crisp edge
+		// line, so the canvas pixels themselves are never tinted.
 		float glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
-		float glowRim = smoothstep(0.34, 0.5, glowEdge) * frontMask;
-		col += vec3(0.35, 0.75, 1.0) * glow * glowRim;
+		float frameBand = 1.0 - frontMask;                            // beveled contour / sides
+		float edgeLine = smoothstep(0.47, 0.5, glowEdge) * frontMask; // ~3%-wide inner edge only
+		float highlight = (frameBand + 0.5 * edgeLine) * glow;
+		col += vec3(0.90, 0.82, 0.55) * 0.6 * highlight;              // soft warm-white lift
 		gl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);
 	}`,
 			vert: `

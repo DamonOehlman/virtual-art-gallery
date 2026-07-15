@@ -229,7 +229,16 @@ function mount(container, opts = {}) {
 		};
 		if (!chosen) { lastCurrentId = null; return null; }
 		lastCurrentId = chosen.image_id;
-		return { image_id: chosen.image_id, title: chosen.title, artist_title: chosen.artist_title, listed: !!chosen.listed };
+		return {
+			image_id: chosen.image_id,
+			title: chosen.title,
+			artist_title: chosen.artist_title,
+			listed: !!chosen.listed,
+			// CO-backed sources carry trait + rarity metadata straight through the
+			// artwork object (placement spreads `...p`); surface it for the HUD plaque.
+			traits: chosen.traits || null,
+			rarity_rank: chosen.rarity_rank != null ? chosen.rarity_rank : null,
+		};
 	};
 
 	// Open the for-sale piece under the crosshair on its Wayup asset page. Returns

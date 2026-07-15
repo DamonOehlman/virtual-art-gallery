@@ -217,46 +217,116 @@ var resolutions = {
   high: 1686
 };
 var source = new URLSearchParams(window.location.search).get("source") || "";
-var sep = source.indexOf(":");
+var sep = source.indexOf(":"); // `let` (not `const`) — setSource() switches these at runtime for the live toggle.
+
 var mode = sep === -1 ? source : source.slice(0, sep); // "listed" | "collection"
 
 var policyId = sep === -1 ? "" : source.slice(sep + 1); // Opaque pagination cursor echoed from the worker (offset for listed, keyset for collection).
 
-var nextCursor = null;
-module.exports = {
-  fetchList: function () {
-    var _fetchList = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee(from, count) {
+var nextCursor = null; // Background-load status for a "loading listings from Wayup…" affordance. The CO
+// listings cache serves a fast first page then backfills the full set; `loading`
+// stays true until the worker reports the set is complete.
+
+var loading = false;
+var total = null;
+var statusPolling = false; // While the listings are still backfilling, poll the worker to refresh the
+// loading/total status even if the viewer stands still (fetchList is otherwise
+// only pull-driven by movement). Cheap (count=1, served from KV) and
+// self-terminating: stops when complete or after a bounded number of attempts.
+
+function scheduleStatusPoll() {
+  if (statusPolling || mode !== "listed" || !policyId) return;
+  statusPolling = true;
+  var attempts = 0;
+
+  var tick = /*#__PURE__*/function () {
+    var _ref = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee() {
       var url, json;
       return _regenerator["default"].wrap(function _callee$(_context) {
         while (1) {
           switch (_context.prev = _context.next) {
             case 0:
+              attempts++;
+              _context.prev = 1;
+              url = "/gallery/source?mode=".concat(encodeURIComponent(mode), "&policy=").concat(encodeURIComponent(policyId), "&count=1");
+              _context.next = 5;
+              return fetch(url).then(function (r) {
+                return r.json();
+              });
+
+            case 5:
+              json = _context.sent;
+              loading = !!json.loading;
+              if (json.total != null) total = json.total;
+              _context.next = 12;
+              break;
+
+            case 10:
+              _context.prev = 10;
+              _context.t0 = _context["catch"](1);
+
+            case 12:
+              if (loading && attempts < 12) {
+                setTimeout(tick, 2000);
+              } else {
+                loading = false; // give up gracefully so the indicator never sticks
+
+                statusPolling = false;
+              }
+
+            case 13:
+            case "end":
+              return _context.stop();
+          }
+        }
+      }, _callee, null, [[1, 10]]);
+    }));
+
+    return function tick() {
+      return _ref.apply(this, arguments);
+    };
+  }();
+
+  setTimeout(tick, 2000);
+}
+
+module.exports = {
+  fetchList: function () {
+    var _fetchList = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee2(from, count) {
+      var url, json;
+      return _regenerator["default"].wrap(function _callee2$(_context2) {
+        while (1) {
+          switch (_context2.prev = _context2.next) {
+            case 0:
               if (policyId) {
-                _context.next = 2;
+                _context2.next = 2;
                 break;
               }
 
-              return _context.abrupt("return", []);
+              return _context2.abrupt("return", []);
 
             case 2:
               url = "/gallery/source?mode=".concat(encodeURIComponent(mode), "&policy=").concat(encodeURIComponent(policyId), "&count=").concat(count);
               if (from > 0 && nextCursor != null) url += "&cursor=".concat(encodeURIComponent(nextCursor));
-              _context.next = 6;
+              _context2.next = 6;
               return fetch(url).then(function (r) {
                 return r.json();
               });
 
             case 6:
-              json = _context.sent;
+              json = _context2.sent;
               nextCursor = json.next_cursor != null ? json.next_cursor : null;
-              return _context.abrupt("return", json.artworks || []);
+              loading = !!json.loading;
+              if (json.total != null) total = json.total;
+              if (loading) scheduleStatusPoll();
+              return _context2.abrupt("return", json.artworks || []);
 
-            case 9:
+            case 12:
             case "end":
-              return _context.stop();
+              return _context2.stop();
           }
         }
-      }, _callee);
+      }, _callee2);
     }));
 
     function fetchList(_x, _x2) {
@@ -265,23 +335,39 @@ module.exports = {
 
     return fetchList;
   }(),
+  // Background-load status for the host shell's progress affordance.
+  progress: function progress() {
+    return {
+      loading: loading,
+      total: total
+    };
+  },
+  // Switch the live source (listed↔collection / policy) at runtime; resets the
+  // cursor + status so the next fetchList starts a fresh page walk.
+  setSource: function setSource(newMode, newPolicy) {
+    mode = newMode;
+    policyId = newPolicy;
+    nextCursor = null;
+    loading = false;
+    total = null;
+  },
   fetchImage: function () {
-    var _fetchImage = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee2(obj, advicedResolution) {
+    var _fetchImage = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee3(obj, advicedResolution) {
       var width, url, blob;
-      return _regenerator["default"].wrap(function _callee2$(_context2) {
+      return _regenerator["default"].wrap(function _callee3$(_context3) {
         while (1) {
-          switch (_context2.prev = _context2.next) {
+          switch (_context3.prev = _context3.next) {
             case 0:
               width = resolutions[advicedResolution];
               url = "".concat(iiifBase, "/iiif/3/").concat(obj.image_id, "/full/").concat(width, ",/0/default.jpg");
-              _context2.next = 4;
+              _context3.next = 4;
               return fetch(url).then(function (r) {
                 return r.blob();
               });
 
             case 4:
-              blob = _context2.sent;
-              return _context2.abrupt("return", {
+              blob = _context3.sent;
+              return _context3.abrupt("return", {
                 // Price is NOT merged into the title — listed pieces get a separate gold
                 // "FOR SALE · <price>" placard line (see image.js tagGen).
                 title: obj.title,
@@ -290,10 +376,10 @@ module.exports = {
 
             case 6:
             case "end":
-              return _context2.stop();
+              return _context3.stop();
           }
         }
-      }, _callee2);
+      }, _callee3);
     }));
 
     function fetchImage(_x3, _x4) {
@@ -10156,7 +10242,13 @@ var text = require('./text');
 var ticket = require('./ticket');
 
 var paintingCache = {};
-var unusedTextures = [];
+var unusedTextures = []; // Progressive loading: base textures always load at 'low' (400px — the warmest
+// IIIF cache tier) for instant display, then upgrade() re-uploads the high-res
+// into the SAME texture object in place. Cap concurrent upgrades so background
+// high-res fetches never starve fresh thumbnail loads or jank the main thread.
+
+var maxConcurrentUpgrades = 2;
+var upgradesInFlight = 0;
 var dynamicQualThreshold = 2;
 
 function dynamicQual(quality) {
@@ -10185,65 +10277,65 @@ function loadImage(_x, _x2, _x3) {
 }
 
 function _loadImage() {
-  _loadImage = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee(regl, p, res) {
+  _loadImage = (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee2(regl, p, res) {
     var image, title, data, tagGen;
-    return _regenerator["default"].wrap(function _callee$(_context) {
+    return _regenerator["default"].wrap(function _callee2$(_context2) {
       while (1) {
-        switch (_context.prev = _context.next) {
+        switch (_context2.prev = _context2.next) {
           case 0:
             if (aniso === false) {
               aniso = regl.hasExtension('EXT_texture_filter_anisotropic') ? regl._gl.getParameter(regl._gl.getExtension('EXT_texture_filter_anisotropic').MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 0;
               console.log(aniso);
             }
 
-            _context.prev = 1;
-            _context.next = 4;
+            _context2.prev = 1;
+            _context2.next = 4;
             return dataAccess.fetchImage(p, dynamicQual(res));
 
           case 4:
-            data = _context.sent;
+            data = _context2.sent;
             title = data.title; // Resize image to a power of 2 to use mipmap (faster than createImageBitmap resizing)
 
-            _context.next = 8;
+            _context2.next = 8;
             return createImageBitmap(data.image);
 
           case 8:
-            image = _context.sent;
+            image = _context2.sent;
             ctx.drawImage(image, 0, 0, resizeCanvas.width, resizeCanvas.height);
-            _context.next = 23;
+            _context2.next = 23;
             break;
 
           case 12:
-            _context.prev = 12;
-            _context.t0 = _context["catch"](1);
+            _context2.prev = 12;
+            _context2.t0 = _context2["catch"](1);
             // Try again with a lower resolution, otherwise return an empty image
-            console.error(_context.t0);
+            console.error(_context2.t0);
 
             if (!(res == "high")) {
-              _context.next = 21;
+              _context2.next = 21;
               break;
             }
 
-            _context.next = 18;
+            _context2.next = 18;
             return loadImage(regl, p, "low");
 
           case 18:
-            _context.t1 = _context.sent;
-            _context.next = 22;
+            _context2.t1 = _context2.sent;
+            _context2.next = 22;
             break;
 
           case 21:
-            _context.t1 = emptyImage(regl);
+            _context2.t1 = emptyImage(regl);
 
           case 22:
-            return _context.abrupt("return", _context.t1);
+            return _context2.abrupt("return", _context2.t1);
 
           case 23:
             // Listed pieces get a swing ticket hanging off the frame corner (price tag).
             tagGen = p.listed && p.artist_title ? function () {
               return ticket.init(unusedTextures.pop() || regl.texture, p.artist_title);
             } : null;
-            return _context.abrupt("return", [(unusedTextures.pop() || regl.texture)({
+            return _context2.abrupt("return", [(unusedTextures.pop() || regl.texture)({
               data: resizeCanvas,
               min: 'mipmap',
               mipmap: 'nice',
@@ -10255,15 +10347,30 @@ function _loadImage() {
 
           case 25:
           case "end":
-            return _context.stop();
+            return _context2.stop();
         }
       }
-    }, _callee, null, [[1, 12]]);
+    }, _callee2, null, [[1, 12]]);
   }));
   return _loadImage.apply(this, arguments);
 }
 
 module.exports = {
+  // Background-load status from the active provider (for the host shell's
+  // "loading listings" affordance); providers without it report not-loading.
+  progress: function progress() {
+    return dataAccess.progress ? dataAccess.progress() : {
+      loading: false,
+      total: null
+    };
+  },
+  // Switch the live source: reset the provider (cursor/mode/policy) and drop
+  // the painting cache so the next fetch repopulates from scratch. The placed
+  // GPU textures are recycled by placement.reload(), which owns the batch.
+  setSource: function setSource(mode, policy) {
+    if (dataAccess.setSource) dataAccess.setSource(mode, policy);
+    paintingCache = {};
+  },
   fetch: function fetch(regl) {
     var count = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 10;
     var res = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : "low";
@@ -10278,8 +10385,9 @@ module.exports = {
           return;
         }
 
-        paintingCache[p.image_id] = p;
-        loadImage(regl, p, res).then(function (_ref) {
+        paintingCache[p.image_id] = p; // Base texture always loads at 'low'; upgrade() sharpens later.
+
+        loadImage(regl, p, "low").then(function (_ref) {
           var _ref2 = (0, _slicedToArray2["default"])(_ref, 4),
               tex = _ref2[0],
               textGen = _ref2[1],
@@ -10290,7 +10398,8 @@ module.exports = {
             tex: tex,
             textGen: textGen,
             tagGen: tagGen,
-            aspect: aspect
+            aspect: aspect,
+            res: "low"
           }));
           if (--count === 0) cbAll();
         });
@@ -10301,7 +10410,7 @@ module.exports = {
     var res = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : "low";
     if (p.tex || p.loading) return;
     p.loading = true;
-    loadImage(regl, p, res).then(function (_ref3) {
+    loadImage(regl, p, "low").then(function (_ref3) {
       var _ref4 = (0, _slicedToArray2["default"])(_ref3, 4),
           tex = _ref4[0],
           textGen = _ref4[1],
@@ -10309,8 +10418,66 @@ module.exports = {
 
       p.loading = false;
       p.tex = tex;
+      p.res = "low";
       p.text = textGen(p.width);
       p.tag = tagGen ? tagGen() : undefined;
+    });
+  },
+  // In-place progressive upgrade: fetch the piece at full quality and re-upload
+  // into the existing texture object (same identity — the render batch never
+  // notices). Skipped while loading/upgrading, once at target, or when the
+  // concurrency budget is spent.
+  upgrade: function upgrade(regl, p) {
+    var target = dynamicQual("high");
+    if (!p.tex || p.loading || p.upgrading || p.res === target) return;
+    if (upgradesInFlight >= maxConcurrentUpgrades) return;
+    p.upgrading = true;
+    upgradesInFlight++;
+    var tex = p.tex;
+    (0, _asyncToGenerator2["default"])( /*#__PURE__*/_regenerator["default"].mark(function _callee() {
+      var data, image;
+      return _regenerator["default"].wrap(function _callee$(_context) {
+        while (1) {
+          switch (_context.prev = _context.next) {
+            case 0:
+              _context.next = 2;
+              return dataAccess.fetchImage(p, target);
+
+            case 2:
+              data = _context.sent;
+              _context.next = 5;
+              return createImageBitmap(data.image);
+
+            case 5:
+              image = _context.sent;
+              // No await between draw and upload — the shared canvas stays coherent.
+              ctx.drawImage(image, 0, 0, resizeCanvas.width, resizeCanvas.height); // The piece may have been unloaded (texture recycled to the pool, and
+              // possibly reused by another painting) while we fetched — only upload
+              // if this texture still belongs to this piece.
+
+              if (p.tex === tex) {
+                tex({
+                  data: resizeCanvas,
+                  min: 'mipmap',
+                  mipmap: 'nice',
+                  aniso: aniso,
+                  flipY: true
+                });
+                p.res = target;
+              }
+
+            case 8:
+            case "end":
+              return _context.stop();
+          }
+        }
+      }, _callee);
+    }))()["catch"](function (e) {
+      // Keep the low-res base; a later call may retry.
+      console.error("upgrade failed", e);
+    })["finally"](function () {
+      p.upgrading = false;
+      upgradesInFlight--;
     });
   },
   unload: function unload(p) {
@@ -10484,6 +10651,9 @@ function _mount(container) {
   var map = require('./map')();
 
   var mesh = require('./mesh');
+
+  var texture = require('./image'); // provider-backed loader; exposes load progress
+
 
   var drawMap = mesh(regl, map, useReflexion);
 
@@ -10672,9 +10842,42 @@ function _mount(container) {
     return {
       image_id: chosen.image_id,
       title: chosen.title,
-      artist_title: chosen.artist_title
+      artist_title: chosen.artist_title,
+      listed: !!chosen.listed
     };
-  };
+  }; // Open the for-sale piece under the crosshair on its Wayup asset page. Returns
+  // true if a listing was opened. image_id is "policy:asset_name_hex", which maps
+  // directly to Wayup's /collection/{policy}/asset/{assetHex} route.
+
+
+  var openFocused = function openFocused() {
+    var c = current();
+    if (!c || !c.listed || !c.image_id) return false;
+    var idx = c.image_id.indexOf(':');
+    if (idx < 0) return false;
+    var policy = c.image_id.slice(0, idx);
+    var hex = c.image_id.slice(idx + 1);
+    if (!policy || !hex) return false;
+    window.open("https://www.wayup.io/collection/".concat(policy, "/asset/").concat(hex), '_blank', 'noopener');
+    return true;
+  }; // Click a for-sale piece → open its Wayup listing, but ONLY on a click made
+  // while already exploring — not on the click that (re)acquires pointer lock.
+  // requestPointerLock is async, so a click that arms the lock can already read
+  // pointerLockElement === canvas by the time `click` fires (e.g. returning to
+  // the tab from Wayup). Snapshot the lock state at mousedown instead: it still
+  // holds the pre-click value there, so an arming/re-arming click reads "unlocked"
+  // and is ignored.
+
+
+  var lockedAtPointerDown = false;
+  canvas.addEventListener('mousedown', function () {
+    lockedAtPointerDown = document.pointerLockElement === canvas;
+  });
+  canvas.addEventListener('click', function () {
+    if (!lockedAtPointerDown) return;
+    if (document.pointerLockElement !== canvas) return;
+    openFocused();
+  });
 
   var camera = function camera() {
     return {
@@ -10688,6 +10891,18 @@ function _mount(container) {
   return {
     canvas: canvas,
     current: current,
+    // Open the focused for-sale piece's Wayup listing (also wired to canvas click).
+    openFocused: openFocused,
+    // Background listings-load status: { loading, total } for the host HUD.
+    loadProgress: function loadProgress() {
+      return texture.progress();
+    },
+    // Switch the live data source (e.g. listed↔collection) without a page
+    // reload: reset the provider + cache, then rebuild the scene from 0.
+    setSource: function setSource(mode, policy) {
+      texture.setSource(mode, policy);
+      placement.reload();
+    },
     // Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
     gazeDebug: function gazeDebug() {
       return lastGazeDebug;
@@ -10726,6 +10941,18 @@ var gallery = {
   },
   current: function current() {
     return active ? active.current() : null;
+  },
+  openFocused: function openFocused() {
+    return active ? active.openFocused() : false;
+  },
+  loadProgress: function loadProgress() {
+    return active ? active.loadProgress() : {
+      loading: false,
+      total: null
+    };
+  },
+  setSource: function setSource(mode, policy) {
+    if (active) active.setSource(mode, policy);
   },
   gazeDebug: function gazeDebug() {
     return active ? active.gazeDebug() : null;
@@ -10777,7 +11004,7 @@ if (!window.__GALLERY_MANUAL__) {
 
 module.exports = gallery;
 
-},{"./fps":130,"./map":133,"./mesh":134,"./painting":135,"./placement":136,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"regl":125,"stats.js":126}],133:[function(require,module,exports){
+},{"./fps":130,"./image":131,"./map":133,"./mesh":134,"./painting":135,"./placement":136,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"regl":125,"stats.js":126}],133:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -11366,98 +11593,114 @@ module.exports = function (regl, _ref2) {
   //console.log(areas);
   var batch = [],
       shownBatch = [];
-  var fetching = true;
+  var fetching = true; // Bumped on every source switch; in-flight fetches from a previous source
+  // carry the old epoch and are dropped so they never leak into the new batch.
 
-  var loadPainting = function loadPainting(p) {
-    var seg = placements[batch.length]; // Calculate painting position, direction, normal angle and scale
+  var loadEpoch = 0;
 
-    var dir = [seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]];
-    var norm = [seg[1][1] - seg[0][1], seg[0][0] - seg[1][0]];
-    var segLen = Math.hypot(dir[0], dir[1]);
-    var globalScale = 4.5 / (3 + p.aspect); //tweaked to look good
+  var loadPainting = function loadPainting(epoch) {
+    return function (p) {
+      if (epoch !== loadEpoch) return; // stale fetch from a previous source
 
-    globalScale = Math.min(globalScale, segLen / p.aspect / 2.2); //clamp horizontal
+      var seg = placements[batch.length]; // Calculate painting position, direction, normal angle and scale
 
-    globalScale = Math.min(globalScale, 2 / 1.2); //clamp vertical
+      var dir = [seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]];
+      var norm = [seg[1][1] - seg[0][1], seg[0][0] - seg[1][0]];
+      var segLen = Math.hypot(dir[0], dir[1]);
+      var globalScale = 4.5 / (3 + p.aspect); //tweaked to look good
 
-    var pos = [(seg[0][0] + seg[1][0]) / 2, 2.1 - globalScale, (seg[0][1] + seg[1][1]) / 2];
-    var angle = Math.atan2(dir[1], dir[0]);
-    var horiz = Math.abs(angle % 3) < 1 ? 1 : 0;
-    var vert = 1 - horiz;
-    var width = globalScale * p.aspect;
-    var scale = [2 * width * horiz + 0.1 * vert, 2 * globalScale, 2 * width * vert + 0.1 * horiz];
-    var text = p.textGen(width);
-    var d1 = width / segLen;
-    var d2 = 0.005 / Math.hypot(norm[0], norm[1]); // Visible painting segment for culling
+      globalScale = Math.min(globalScale, segLen / p.aspect / 2.2); //clamp horizontal
 
-    var vseg = [[pos[0] - dir[0] * d1 * 2, pos[2] - dir[1] * d1], [pos[0] + dir[0] * d1 * 2, pos[2] + dir[1] * d1]]; // Offset pos to account for painting width and depth
+      globalScale = Math.min(globalScale, 2 / 1.2); //clamp vertical
 
-    pos[0] -= dir[0] * d1 + norm[0] * d2;
-    pos[2] -= dir[1] * d1 + norm[1] * d2; // Calculate model matrix
+      var pos = [(seg[0][0] + seg[1][0]) / 2, 2.1 - globalScale, (seg[0][1] + seg[1][1]) / 2];
+      var angle = Math.atan2(dir[1], dir[0]);
+      var horiz = Math.abs(angle % 3) < 1 ? 1 : 0;
+      var vert = 1 - horiz;
+      var width = globalScale * p.aspect;
+      var scale = [2 * width * horiz + 0.1 * vert, 2 * globalScale, 2 * width * vert + 0.1 * horiz];
+      var text = p.textGen(width);
+      var d1 = width / segLen;
+      var d2 = 0.005 / Math.hypot(norm[0], norm[1]); // Visible painting segment for culling
 
-    var model = [];
-    mat4.fromTranslation(model, pos);
-    mat4.scale(model, model, scale);
-    mat4.rotateY(model, model, -angle);
-    var textmodel = [];
-    mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
-    mat4.scale(textmodel, textmodel, [2, 2, 2]);
-    mat4.rotateY(textmodel, textmodel, -angle); // Optional "for sale" ticket, placed ON the artwork at its bottom-right
-    // corner like a price sticker in a physical gallery. Corners come from
-    // the painting's own model matrix, so this works on every wall
-    // orientation.
+      var vseg = [[pos[0] - dir[0] * d1 * 2, pos[2] - dir[1] * d1], [pos[0] + dir[0] * d1 * 2, pos[2] + dir[1] * d1]]; // Offset pos to account for painting width and depth
 
-    var tag = null,
-        tagmodel = null;
+      pos[0] -= dir[0] * d1 + norm[0] * d2;
+      pos[2] -= dir[1] * d1 + norm[1] * d2; // Calculate model matrix
 
-    if (p.tagGen) {
-      var TICKET_W = 0.34,
-          TICKET_H = 0.17,
-          TILT = -0.05,
-          INSET = 0.05;
-      var c0 = vec3.transformMat4([], [0, 0, 1], model); // front bottom-left corner
+      var model = [];
+      mat4.fromTranslation(model, pos);
+      mat4.scale(model, model, scale);
+      mat4.rotateY(model, model, -angle);
+      var textmodel = [];
+      mat4.fromTranslation(textmodel, [pos[0], 1.7 - globalScale, pos[2]]);
+      mat4.scale(textmodel, textmodel, [2, 2, 2]);
+      mat4.rotateY(textmodel, textmodel, -angle); // Optional "for sale" ticket, placed ON the artwork at its bottom-right
+      // corner like a price sticker in a physical gallery. Corners come from
+      // the painting's own model matrix, so this works on every wall
+      // orientation.
 
-      var c1 = vec3.transformMat4([], [1, 0, 1], model); // front bottom-right corner
+      var tag = null,
+          tagmodel = null;
 
-      var b1 = vec3.transformMat4([], [1, 0, 0], model); // c1's back counterpart
+      if (p.tagGen) {
+        var TICKET_W = 0.34,
+            TICKET_H = 0.17,
+            TILT = -0.05,
+            INSET = 0.05;
+        var c0 = vec3.transformMat4([], [0, 0, 1], model); // front bottom-left corner
 
-      var along = vec3.normalize([], vec3.sub([], c1, c0)); // along the wall, left→right
+        var c1 = vec3.transformMat4([], [1, 0, 1], model); // front bottom-right corner
 
-      var out = vec3.normalize([], vec3.sub([], c1, b1)); // out of the wall
+        var b1 = vec3.transformMat4([], [1, 0, 0], model); // c1's back counterpart
 
-      tagmodel = []; // Pivot at the card's bottom-right, inset from the artwork corner and
-      // lifted just off the face; the card extends up-left onto the image.
+        var along = vec3.normalize([], vec3.sub([], c1, c0)); // along the wall, left→right
 
-      mat4.fromTranslation(tagmodel, [c1[0] - along[0] * INSET + out[0] * 0.01, c1[1] + INSET, c1[2] - along[2] * INSET + out[2] * 0.01]);
-      mat4.rotateY(tagmodel, tagmodel, -angle);
-      mat4.rotateZ(tagmodel, tagmodel, TILT);
-      mat4.translate(tagmodel, tagmodel, [-TICKET_W, 0, 0]);
-      mat4.scale(tagmodel, tagmodel, [TICKET_W, TICKET_H, 1]);
-      tag = p.tagGen();
-    } // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
-    // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
+        var out = vec3.normalize([], vec3.sub([], c1, b1)); // out of the wall
 
+        tagmodel = []; // Pivot at the card's bottom-right, inset from the artwork corner and
+        // lifted just off the face; the card extends up-left onto the image.
 
-    batch.push(_objectSpread(_objectSpread({}, p), {}, {
-      vseg: vseg,
-      angle: angle,
-      model: model,
-      textmodel: textmodel,
-      text: text,
-      tag: tag,
-      tagmodel: tagmodel,
-      width: width,
-      yLo: 2.1 - globalScale,
-      yHi: 2.1 + globalScale,
-      textGen: null,
-      tagGen: null
-    }));
-  }; // Fetch the first textures
+        mat4.fromTranslation(tagmodel, [c1[0] - along[0] * INSET + out[0] * 0.01, c1[1] + INSET, c1[2] - along[2] * INSET + out[2] * 0.01]);
+        mat4.rotateY(tagmodel, tagmodel, -angle);
+        mat4.rotateZ(tagmodel, tagmodel, TILT);
+        mat4.translate(tagmodel, tagmodel, [-TICKET_W, 0, 0]);
+        mat4.scale(tagmodel, tagmodel, [TICKET_W, TICKET_H, 1]);
+        tag = p.tagGen();
+      } // Front-face vertical extent (world y), for accurate gaze ray hit-testing:
+      // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
 
 
-  texture.fetch(regl, 20, dynamicRes, loadPainting, function () {
-    return fetching = false;
-  });
+      batch.push(_objectSpread(_objectSpread({}, p), {}, {
+        vseg: vseg,
+        angle: angle,
+        model: model,
+        textmodel: textmodel,
+        text: text,
+        tag: tag,
+        tagmodel: tagmodel,
+        width: width,
+        yLo: 2.1 - globalScale,
+        yHi: 2.1 + globalScale,
+        textGen: null,
+        tagGen: null
+      }));
+    };
+  }; // Start a batch fetch tagged with the current epoch so a later source switch
+  // can invalidate its in-flight callbacks.
+
+
+  var startFetch = function startFetch(count) {
+    var epoch = loadEpoch;
+    fetching = true;
+    texture.fetch(regl, count, "low", loadPainting(epoch), function () {
+      if (epoch === loadEpoch) fetching = false;
+    });
+  }; // Fetch the first textures (base loads are always low-res thumbnails;
+  // upgrade() sharpens visible pieces in place once streaming settles)
+
+
+  startFetch(20);
   return {
     update: function update(pos, angle, fovX) {
       // Estimate player position index
@@ -11474,20 +11717,24 @@ module.exports = function (regl, _ref2) {
 
       shownBatch = batch.slice(Math.max(0, index - renderDist), index + renderDist);
       shownBatch.map(function (t) {
-        return texture.load(regl, t, dynamicRes);
+        return texture.load(regl, t, "low");
       }); // Frustum / Orientation culling
 
       shownBatch = shownBatch.filter(function (t) {
         return t.tex && culling(pos, angle, fovX, t);
+      }); // Progressively sharpen visible pieces once we're not actively
+      // streaming a new area (dynamicRes drops to "low" while fetching and
+      // flips back after 3s — reuse it as the upgrade gate). The per-piece
+      // guards + concurrency cap in texture.upgrade make this cheap.
+
+      if (dynamicRes === "high") shownBatch.map(function (t) {
+        return texture.upgrade(regl, t);
       }); // Fetch new textures
 
       if (index <= batch.length - loadDist) return;
 
       if (!fetching) {
-        texture.fetch(regl, 10, dynamicRes, loadPainting, function () {
-          return fetching = false;
-        });
-        fetching = true;
+        startFetch(10);
       } // Update dynamic resolution
 
 
@@ -11499,6 +11746,20 @@ module.exports = function (regl, _ref2) {
     },
     batch: function batch() {
       return shownBatch;
+    },
+    // Clear the current scene and re-fetch from the start (used by a live
+    // source switch). Bumps the epoch so any in-flight fetch from the old
+    // source is dropped, unloads all placed textures back to the pool, then
+    // kicks a fresh 20-piece fetch. The provider's cursor/cache must already
+    // be reset (see texture.setSource) before calling this.
+    reload: function reload() {
+      loadEpoch++;
+      batch.map(function (t) {
+        return texture.unload(t);
+      });
+      batch = [];
+      shownBatch = [];
+      startFetch(20);
     }
   };
 };

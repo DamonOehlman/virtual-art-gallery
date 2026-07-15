@@ -113,6 +113,7 @@ function mount(container, opts = {}) {
 
 	const map = require('./map')();
 	const mesh = require('./mesh');
+	const texture = require('./image'); // provider-backed loader; exposes load progress
 	const drawMap = mesh(regl, map, useReflexion);
 	const placement = require('./placement')(regl, map);
 	const drawPainting = require('./painting')(regl);
@@ -228,8 +229,40 @@ function mount(container, opts = {}) {
 		};
 		if (!chosen) { lastCurrentId = null; return null; }
 		lastCurrentId = chosen.image_id;
-		return { image_id: chosen.image_id, title: chosen.title, artist_title: chosen.artist_title };
+		return { image_id: chosen.image_id, title: chosen.title, artist_title: chosen.artist_title, listed: !!chosen.listed };
 	};
+
+	// Open the for-sale piece under the crosshair on its Wayup asset page. Returns
+	// true if a listing was opened. image_id is "policy:asset_name_hex", which maps
+	// directly to Wayup's /collection/{policy}/asset/{assetHex} route.
+	const openFocused = () => {
+		const c = current();
+		if (!c || !c.listed || !c.image_id) return false;
+		const idx = c.image_id.indexOf(':');
+		if (idx < 0) return false;
+		const policy = c.image_id.slice(0, idx);
+		const hex = c.image_id.slice(idx + 1);
+		if (!policy || !hex) return false;
+		window.open(`https://www.wayup.io/collection/${policy}/asset/${hex}`, '_blank', 'noopener');
+		return true;
+	};
+
+	// Click a for-sale piece → open its Wayup listing, but ONLY on a click made
+	// while already exploring — not on the click that (re)acquires pointer lock.
+	// requestPointerLock is async, so a click that arms the lock can already read
+	// pointerLockElement === canvas by the time `click` fires (e.g. returning to
+	// the tab from Wayup). Snapshot the lock state at mousedown instead: it still
+	// holds the pre-click value there, so an arming/re-arming click reads "unlocked"
+	// and is ignored.
+	let lockedAtPointerDown = false;
+	canvas.addEventListener('mousedown', () => {
+		lockedAtPointerDown = document.pointerLockElement === canvas;
+	});
+	canvas.addEventListener('click', () => {
+		if (!lockedAtPointerDown) return;
+		if (document.pointerLockElement !== canvas) return;
+		openFocused();
+	});
 
 	const camera = () => ({
 		pos: [fps.pos[0], fps.pos[1], fps.pos[2]],
@@ -241,6 +274,13 @@ function mount(container, opts = {}) {
 	return {
 		canvas,
 		current,
+		// Open the focused for-sale piece's Wayup listing (also wired to canvas click).
+		openFocused,
+		// Background listings-load status: { loading, total } for the host HUD.
+		loadProgress: () => texture.progress(),
+		// Switch the live data source (e.g. listed↔collection) without a page
+		// reload: reset the provider + cache, then rebuild the scene from 0.
+		setSource: (mode, policy) => { texture.setSource(mode, policy); placement.reload(); },
 		// Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
 		gazeDebug: () => lastGazeDebug,
 		camera,
@@ -270,6 +310,9 @@ const gallery = {
 	},
 	isMounted: () => !!active,
 	current: () => (active ? active.current() : null),
+	openFocused: () => (active ? active.openFocused() : false),
+	loadProgress: () => (active ? active.loadProgress() : { loading: false, total: null }),
+	setSource: (mode, policy) => { if (active) active.setSource(mode, policy); },
 	gazeDebug: () => (active ? active.gazeDebug() : null),
 	camera: () => (active ? active.camera() : null),
 	setInputEnabled: (b) => { if (active) active.setInputEnabled(b); },

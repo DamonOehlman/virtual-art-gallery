@@ -15,6 +15,13 @@ const ticket = require('./ticket');
 let paintingCache = {};
 let unusedTextures = [];
 
+// Progressive loading: base textures always load at 'low' (400px — the warmest
+// IIIF cache tier) for instant display, then upgrade() re-uploads the high-res
+// into the SAME texture object in place. Cap concurrent upgrades so background
+// high-res fetches never starve fresh thumbnail loads or jank the main thread.
+const maxConcurrentUpgrades = 2;
+let upgradesInFlight = 0;
+
 const dynamicQualThreshold = 2;
 function dynamicQual(quality) {
 	if(!navigator.connection || navigator.connection.downlink < dynamicQualThreshold) {
@@ -76,6 +83,16 @@ async function loadImage(regl, p, res) {
 }
 
 module.exports = {
+	// Background-load status from the active provider (for the host shell's
+	// "loading listings" affordance); providers without it report not-loading.
+	progress: () => (dataAccess.progress ? dataAccess.progress() : { loading: false, total: null }),
+	// Switch the live source: reset the provider (cursor/mode/policy) and drop
+	// the painting cache so the next fetch repopulates from scratch. The placed
+	// GPU textures are recycled by placement.reload(), which owns the batch.
+	setSource: (mode, policy) => {
+		if (dataAccess.setSource) dataAccess.setSource(mode, policy);
+		paintingCache = {};
+	},
 	fetch: (regl, count = 10, res = "low", cbOne, cbAll) => {
 		const from = Object.keys(paintingCache).length;
 		dataAccess.fetchList(from, count).then(paintings => {
@@ -87,8 +104,9 @@ module.exports = {
 					return;
 				}
 				paintingCache[p.image_id] = p;
-				loadImage(regl, p, res).then(([tex, textGen, aspect, tagGen]) => {
-					cbOne({ ...p, tex, textGen, tagGen, aspect });
+				// Base texture always loads at 'low'; upgrade() sharpens later.
+				loadImage(regl, p, "low").then(([tex, textGen, aspect, tagGen]) => {
+					cbOne({ ...p, tex, textGen, tagGen, aspect, res: "low" });
 					if (--count === 0)
 						cbAll();
 				});
@@ -99,11 +117,51 @@ module.exports = {
 		if (p.tex || p.loading)
 			return;
 		p.loading = true;
-		loadImage(regl, p, res).then(([tex, textGen, , tagGen]) => {
+		loadImage(regl, p, "low").then(([tex, textGen, , tagGen]) => {
 			p.loading = false;
 			p.tex = tex;
+			p.res = "low";
 			p.text = textGen(p.width);
 			p.tag = tagGen ? tagGen() : undefined;
+		});
+	},
+	// In-place progressive upgrade: fetch the piece at full quality and re-upload
+	// into the existing texture object (same identity — the render batch never
+	// notices). Skipped while loading/upgrading, once at target, or when the
+	// concurrency budget is spent.
+	upgrade: (regl, p) => {
+		const target = dynamicQual("high");
+		if (!p.tex || p.loading || p.upgrading || p.res === target)
+			return;
+		if (upgradesInFlight >= maxConcurrentUpgrades)
+			return;
+		p.upgrading = true;
+		upgradesInFlight++;
+		const tex = p.tex;
+		(async () => {
+			const data = await dataAccess.fetchImage(p, target);
+			const image = await createImageBitmap(data.image);
+			// No await between draw and upload — the shared canvas stays coherent.
+			ctx.drawImage(image, 0, 0, resizeCanvas.width, resizeCanvas.height);
+			// The piece may have been unloaded (texture recycled to the pool, and
+			// possibly reused by another painting) while we fetched — only upload
+			// if this texture still belongs to this piece.
+			if (p.tex === tex) {
+				tex({
+					data: resizeCanvas,
+					min: 'mipmap',
+					mipmap: 'nice',
+					aniso,
+					flipY: true
+				});
+				p.res = target;
+			}
+		})().catch(e => {
+			// Keep the low-res base; a later call may retry.
+			console.error("upgrade failed", e);
+		}).finally(() => {
+			p.upgrading = false;
+			upgradesInFlight--;
 		});
 	},
 	unload: (p) => {

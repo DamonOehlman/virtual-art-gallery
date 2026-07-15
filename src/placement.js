@@ -31,7 +31,11 @@ module.exports = (regl, {placements, getAreaIndex}) => {
     //console.log(areas);
     let batch = [], shownBatch = [];
     let fetching = true;
-    const loadPainting = (p) => {
+    // Bumped on every source switch; in-flight fetches from a previous source
+    // carry the old epoch and are dropped so they never leak into the new batch.
+    let loadEpoch = 0;
+    const loadPainting = (epoch) => (p) => {
+        if (epoch !== loadEpoch) return; // stale fetch from a previous source
         const seg = placements[batch.length];
         // Calculate painting position, direction, normal angle and scale
         const dir = [seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]];
@@ -99,8 +103,18 @@ module.exports = (regl, {placements, getAreaIndex}) => {
         // the model places the unit quad at pos[1]=2.1-globalScale with height 2*globalScale.
         batch.push({ ...p, vseg, angle, model, textmodel, text, tag, tagmodel, width, yLo: 2.1 - globalScale, yHi: 2.1 + globalScale, textGen:null, tagGen:null });
     };
-    // Fetch the first textures
-    texture.fetch(regl, 20, dynamicRes, loadPainting, () => fetching = false);
+    // Start a batch fetch tagged with the current epoch so a later source switch
+    // can invalidate its in-flight callbacks.
+    const startFetch = (count) => {
+        const epoch = loadEpoch;
+        fetching = true;
+        texture.fetch(regl, count, "low", loadPainting(epoch), () => {
+            if (epoch === loadEpoch) fetching = false;
+        });
+    };
+    // Fetch the first textures (base loads are always low-res thumbnails;
+    // upgrade() sharpens visible pieces in place once streaming settles)
+    startFetch(20);
     return {
         update: (pos, angle, fovX) => {
             // Estimate player position index
@@ -111,20 +125,37 @@ module.exports = (regl, {placements, getAreaIndex}) => {
             batch.slice(index + unloadDist).map(t => texture.unload(t));
             // Load close textures
             shownBatch = batch.slice(Math.max(0, index - renderDist), index + renderDist);
-            shownBatch.map(t => texture.load(regl, t, dynamicRes));
+            shownBatch.map(t => texture.load(regl, t, "low"));
             // Frustum / Orientation culling
             shownBatch = shownBatch.filter(t => t.tex && culling(pos, angle, fovX, t));
+            // Progressively sharpen visible pieces once we're not actively
+            // streaming a new area (dynamicRes drops to "low" while fetching and
+            // flips back after 3s — reuse it as the upgrade gate). The per-piece
+            // guards + concurrency cap in texture.upgrade make this cheap.
+            if (dynamicRes === "high")
+                shownBatch.map(t => texture.upgrade(regl, t));
             // Fetch new textures
             if (index <= batch.length - loadDist) return;
             if (!fetching) {
-                texture.fetch(regl, 10, dynamicRes, loadPainting, () => fetching = false);
-                fetching = true;
+                startFetch(10);
             }
             // Update dynamic resolution
             dynamicRes = "low";
             if (dynamicResTimer) clearTimeout(dynamicResTimer);
             dynamicResTimer = setTimeout(() => dynamicRes = "high", dynamicResPeriod);
         },
-        batch: () => shownBatch
+        batch: () => shownBatch,
+        // Clear the current scene and re-fetch from the start (used by a live
+        // source switch). Bumps the epoch so any in-flight fetch from the old
+        // source is dropped, unloads all placed textures back to the pool, then
+        // kicks a fresh 20-piece fetch. The provider's cursor/cache must already
+        // be reset (see texture.setSource) before calling this.
+        reload: () => {
+            loadEpoch++;
+            batch.map(t => texture.unload(t));
+            batch = [];
+            shownBatch = [];
+            startFetch(20);
+        }
     };
 };

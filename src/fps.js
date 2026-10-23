@@ -61,7 +61,7 @@ const lerp = (x, a, b) => (1 - x) * a + x * b;
 const easeInOutQuad = x =>
 	x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
 
-module.exports = function ({getGridSegments, getGridParts}, fovY) {
+module.exports = function ({getGridSegments, getGridParts}, fovY, canvas, viewport) {
 	var mouse = [0, Math.PI * 3 / 4];
 	var fmouse = [0, Math.PI * 3 / 4];
 	var dir = [0, 0, 0];
@@ -75,6 +75,7 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 	var startPos = [0,0,0];
 	var endPos = [0,0,0];
 	var tpProgress = 1;
+	var inputEnabled = true;
 
 	const orientCamera = (dx, dy, sensibility)=> {
 		dx = Math.max(Math.min(dx, 100), -100);
@@ -86,10 +87,16 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 		mouse[1] += dx * sensibility;
 	};
 
-	// Mouse input
-	let pointer = lock(document.body);
+	// Mouse input — scoped to the gallery canvas, gated by inputEnabled so it
+	// never steals pointer-lock/keys from the host shell when in menu mode.
+	let pointer = lock(canvas);
 	pointer.on('attain', (movements) => {
+		if (!inputEnabled) {
+			if (document.exitPointerLock) document.exitPointerLock();
+			return;
+		}
 		movements.on('data', (move) => {
+			if (!inputEnabled) return;
 			orientCamera(move.dx, move.dy, mouseSensibility);
 		});
 	});
@@ -99,6 +106,7 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 	let lastTouch = false;
 	let touchTimestamp = 0;
 	const handleTouch = (e) => {
+		if (!inputEnabled) return;
 		e.preventDefault();
 		if(pointer) {
 			pointer.destroy();
@@ -116,7 +124,8 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 			if(e.timeStamp - touchTimestamp < durationToClick && d < distToClick) {
 				// compute touch vector
 				let tmp = [], tmp1 = [], tmp2 = [];
-				let touchDir = [-1 + 2 * lastTouch.pageX / window.innerWidth, 1 - 2 * lastTouch.pageY / window.innerHeight, 0];
+				const rect = canvas.getBoundingClientRect();
+				let touchDir = [-1 + 2 * (lastTouch.clientX - rect.left) / rect.width, 1 - 2 * (lastTouch.clientY - rect.top) / rect.height, 0];
 				vec3.transformMat4(touchDir, touchDir, mat4.invert(tmp, proj));
 				vec3.transformMat4(touchDir, touchDir, mat4.invert(tmp, view));
 				vec3.sub(touchDir, touchDir, pos);
@@ -198,13 +207,14 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 		}
 		//console.log(e);
 	}
-	window.addEventListener('touchstart', handleTouch, {passive: false});
-	window.addEventListener('touchmove', handleTouch, {passive: false});
-	window.addEventListener('touchend', handleTouch, {passive: false});
+	canvas.addEventListener('touchstart', handleTouch, {passive: false});
+	canvas.addEventListener('touchmove', handleTouch, {passive: false});
+	canvas.addEventListener('touchend', handleTouch, {passive: false});
 
 	// Keyboard input
 	var keys = {};
 	const handleKey = (e) => {
+		if (!inputEnabled) return;
 		if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
 		keys[e.code] = e.type === 'keydown';
 		run = e.shiftKey;
@@ -222,10 +232,40 @@ module.exports = function ({getGridSegments, getGridParts}, fovY) {
 	var lastTime = 0;
 	return {
 		pos, fmouse, forward, up,
+		setInputEnabled: (b) => {
+			inputEnabled = !!b;
+			if (!inputEnabled) {
+				if (document.exitPointerLock) document.exitPointerLock();
+				keys = {};
+				dir = [0, 0, 0];
+			}
+		},
+		destroy: () => {
+			if (pointer) { try { pointer.destroy(); } catch (e) {} pointer = false; }
+			canvas.removeEventListener('touchstart', handleTouch);
+			canvas.removeEventListener('touchmove', handleTouch);
+			canvas.removeEventListener('touchend', handleTouch);
+			window.removeEventListener('keydown', handleKey);
+			window.removeEventListener('keyup', handleKey);
+		},
 		view: () => view,
 		proj: () => {
-			mat4.perspective(proj, fovY(), window.innerWidth / window.innerHeight, 0.1, 100);
+			const [w, h] = viewport();
+			mat4.perspective(proj, fovY(), w / h, 0.1, 100);
 			return proj;
+		},
+		// The exact world-space ray through the centre of the screen (crosshair),
+		// unprojected from NDC (0,0) via the current proj+view — same construction
+		// the touch-teleport raycast uses. Used by current() to pick the artwork
+		// literally under the crosshair rather than by bearing heuristics.
+		centerRay: () => {
+			let tmp = [];
+			let dir = [0, 0, 0];
+			vec3.transformMat4(dir, dir, mat4.invert(tmp, proj));
+			vec3.transformMat4(dir, dir, mat4.invert(tmp, view));
+			vec3.sub(dir, dir, pos);
+			vec3.normalize(dir, dir);
+			return { origin: [pos[0], pos[1], pos[2]], dir };
 		},
 		tick: ({ time }) => {
 			// Delta time

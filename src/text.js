@@ -75,11 +75,12 @@ module.exports = {
             frag: `
             precision mediump float;
             uniform sampler2D tex;
+            uniform vec4 textcolor;
             varying vec2 uv;
         
             void main () {
                 float c = texture2D(tex, uv).r;
-                gl_FragColor = vec4(0,0,0, c);
+                gl_FragColor = vec4(textcolor.rgb, c * textcolor.a);
             }`,
             vert: `
             precision highp float;
@@ -98,7 +99,8 @@ module.exports = {
             },
             uniforms: {
                 model: regl.prop('textmodel'),
-                tex: regl.prop('text')
+                tex: regl.prop('text'),
+                textcolor: regl.prop('textcolor')
             },
             count: 6,
 

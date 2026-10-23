@@ -1,6 +1,7 @@
 'use strict';
 
 const text = require('./text');
+const ticket = require('./ticket');
 
 module.exports = (regl) => {
 	const drawText = text.draw(regl);
@@ -9,6 +10,7 @@ module.exports = (regl) => {
 			frag: `
 	precision lowp float;
 	uniform sampler2D tex;
+	uniform float glow;
 	varying vec3 uv;
 
 	// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/
@@ -35,6 +37,14 @@ module.exports = (regl) => {
 		float sideShading = pow(uv.z/4.0, 0.1);
 		vec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;
 		col *= mix(sideShading, 1., frontMask);
+		// Attention highlight: light the FRAME, not the art. Presence intensity
+		// (concurrent viewers) warms the beveled contour plus a thin crisp edge
+		// line, so the canvas pixels themselves are never tinted.
+		float glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+		float frameBand = 1.0 - frontMask;                            // beveled contour / sides
+		float edgeLine = smoothstep(0.47, 0.5, glowEdge) * frontMask; // ~3%-wide inner edge only
+		float highlight = (frameBand + 0.5 * edgeLine) * glow;
+		col += vec3(0.90, 0.82, 0.55) * 0.6 * highlight;              // soft warm-white lift
 		gl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);
 	}`,
 			vert: `
@@ -81,7 +91,8 @@ module.exports = (regl) => {
 
 			uniforms: {
 				model: regl.prop('model'),
-				tex: regl.prop('tex')
+				tex: regl.prop('tex'),
+				glow: regl.prop('glow')
 			},
 
 			blend: {
@@ -95,8 +106,15 @@ module.exports = (regl) => {
 				color: [0, 0, 0, 0]
 			}
 		});
+	const drawTicket = ticket.draw(regl);
+	const TITLE_COLOR = [0, 0, 0, 1];
 	return function (batch) {
 		painting(batch);
-		drawText(batch);
+		drawText(batch.map(p => ({ text: p.text, textmodel: p.textmodel, textcolor: TITLE_COLOR })));
+		// "For sale" swing tickets on listed pieces.
+		const tags = batch
+			.filter(p => p.tag)
+			.map(p => ({ tex: p.tag, model: p.tagmodel }));
+		if (tags.length) drawTicket(tags);
 	}
 };

@@ -242,6 +242,9 @@ module.exports = function (n = mapSize, r = cellSize, w = wallThickness, m = wal
 		getGridParts,
 		position,
 		normal,
-		elements
+		elements,
+		// Wall height, for consumers that project the wall faces (the live-art
+		// overlay clips an iframe against them).
+		height: h
 	};
 };

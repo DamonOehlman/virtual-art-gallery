@@ -8,6 +8,8 @@
 // direct calls. It still auto-mounts fullscreen for standalone/dev use unless the
 // host sets `window.__GALLERY_MANUAL__ = true` before loading the bundle.
 
+const nearestWallHit = require('./walls');
+
 const mapVal = (value, min1, max1, min2, max2) =>
 	min2 + (value - min1) * (max2 - min2) / (max1 - min1);
 
@@ -24,33 +26,6 @@ const GAZE_Y_MAX = 3.8;
 const GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
 const GAZE_WALL_EPS = 0.5; // a wall nearer than (paintingHit - this) occludes the piece
 
-// Nearest wall-segment hit along the screen-centre ray (xz plane), used to reject
-// painting hits that are behind a wall. Walls are gathered from the grid along the
-// ray, mirroring the touch-teleport raycast's sampling.
-const nearestWallHit = (mapObj, ox, oz, dx, dz, maxT) => {
-	let sx = dx, sz = dz;
-	const sl = Math.hypot(sx, sz) || 1;
-	sx /= sl; sz /= sl;
-	const walls = [];
-	const STEP = 4;
-	for (let d = 0; d <= maxT + STEP; d += STEP) {
-		const segs = mapObj.getGridSegments(ox + sx * d, oz + sz * d);
-		for (let i = 0; i < segs.length; i++) walls.push(segs[i]);
-	}
-	let minT = null;
-	for (const seg of walls) {
-		const a = seg[0], b = seg[1];
-		const ex = b[0] - a[0], ez = b[1] - a[1];
-		const denom = dx * ez - dz * ex;
-		if (Math.abs(denom) < 1e-6) continue;
-		const aox = a[0] - ox, aoz = a[1] - oz;
-		const t = (aox * ez - aoz * ex) / denom;
-		const s = (aox * dz - aoz * dx) / denom;
-		if (t <= 0 || s < 0 || s > 1) continue;
-		if (minT === null || t < minT) minT = t;
-	}
-	return minT;
-};
 
 function mount(container, opts = {}) {
 	const useReflexion = opts.reflexion !== undefined ? opts.reflexion : !isMobile;
@@ -118,6 +93,9 @@ function mount(container, opts = {}) {
 	const placement = require('./placement')(regl, map);
 	const drawPainting = require('./painting')(regl);
 	const fps = require('./fps')(map, fovY, canvas, viewport);
+	const liveArt = require('./live-art')(container, canvas, map);
+	const initialSource = texture.source ? texture.source() : null;
+	if (initialSource) liveArt.setSource(initialSource.mode, initialSource.policyId);
 
 	// Per-artwork presence glow intensity, keyed by image_id. Driven by the host
 	// via the `setGlow` handle; applied per painting each frame.
@@ -157,6 +135,9 @@ function mount(container, opts = {}) {
 		for (let i = 0; i < batch.length; i++) {
 			batch[i].glow = glowMap[batch[i].image_id] || 0;
 		}
+		// Live on-chain pieces: keep the HTML overlay on the same projection
+		// the GL frame is about to use.
+		liveArt.update(batch, fps.view(), fps.proj(), fps.pos);
 		context(() => {
 			if (useReflexion) {
 				reflexion(() => {
@@ -289,7 +270,11 @@ function mount(container, opts = {}) {
 		loadProgress: () => texture.progress(),
 		// Switch the live data source (e.g. listed↔collection) without a page
 		// reload: reset the provider + cache, then rebuild the scene from 0.
-		setSource: (mode, policy) => { texture.setSource(mode, policy); placement.reload(); },
+		setSource: (mode, policy) => {
+			texture.setSource(mode, policy);
+			liveArt.setSource(mode, policy);
+			placement.reload();
+		},
 		// Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
 		gazeDebug: () => lastGazeDebug,
 		camera,
@@ -300,6 +285,7 @@ function mount(container, opts = {}) {
 		unmount: () => {
 			loop.cancel();
 			ro.disconnect();
+			liveArt.destroy();
 			fps.destroy();
 			regl.destroy();
 			if (canvas.parentNode) canvas.parentNode.removeChild(canvas);

@@ -138,7 +138,7 @@ module.exports = {
             case 3:
               json = _context.sent;
               return _context.abrupt("return", json.artworks.filter(function (d) {
-                return d.image_id;
+                return d.image_id && !d.image_id.endsWith(":");
               }));
 
             case 5:
@@ -162,9 +162,14 @@ module.exports = {
         while (1) {
           switch (_context2.prev = _context2.next) {
             case 0:
-              width = resolutions[advicedResolution]; // Use IIIF Image API directly: {base}/{policy}:{asset}/full/{width},/0/default.jpg
+              width = resolutions[advicedResolution]; // Use IIIF Image API directly: {base}/{policy}:{asset}/full/{width},/0/default.auto
+              //
+              // `.auto` lets the service pick the container from what it knows the art
+              // to be. Pixel-art collections come back lossless instead of a blurred
+              // JPEG; asking for `.jpg` explicitly earns a redirect to the right one,
+              // which is a wasted round trip per image on a wall full of them.
 
-              url = "https://iiif.hodlcroft.com/iiif/3/".concat(obj.image_id, "/full/").concat(width, ",/0/default.jpg");
+              url = "https://iiif.hodlcroft.com/iiif/3/".concat(obj.image_id, "/full/").concat(width, ",/0/default.auto");
               _context2.next = 4;
               return fetch(url).then(function (res) {
                 return res.blob();
@@ -318,8 +323,13 @@ module.exports = {
               nextCursor = json.next_cursor != null ? json.next_cursor : null;
               loading = !!json.loading;
               if (json.total != null) total = json.total;
-              if (loading) scheduleStatusPoll();
-              return _context2.abrupt("return", json.artworks || []);
+              if (loading) scheduleStatusPoll(); // `image_id` is `policy:asset_name_hex`. An empty name hex has no
+              // addressable image or live document; a stale source must not turn it
+              // into a IIIF 400 (or a `/gallery/art` probe).
+
+              return _context2.abrupt("return", (json.artworks || []).filter(function (a) {
+                return a.image_id && !a.image_id.endsWith(":");
+              }));
 
             case 12:
             case "end":
@@ -342,6 +352,16 @@ module.exports = {
       total: total
     };
   },
+  // The live source this provider is walking. The renderer's live-art overlay
+  // uses the policy to ask the gallery worker for a piece's on-chain document;
+  // a provider without this method is not a collection walk and gets no
+  // overlay.
+  source: function source() {
+    return {
+      mode: mode,
+      policyId: policyId
+    };
+  },
   // Switch the live source (listed↔collection / policy) at runtime; resets the
   // cursor + status so the next fetchList starts a fresh page walk.
   setSource: function setSource(newMode, newPolicy) {
@@ -358,8 +378,11 @@ module.exports = {
         while (1) {
           switch (_context3.prev = _context3.next) {
             case 0:
-              width = resolutions[advicedResolution];
-              url = "".concat(iiifBase, "/iiif/3/").concat(obj.image_id, "/full/").concat(width, ",/0/default.jpg");
+              width = resolutions[advicedResolution]; // `.auto` — the service picks the container from what it knows the art to
+              // be, so pixel-art collections arrive lossless rather than as a blurred
+              // JPEG, with no redirect round trip. See api/cnft.js.
+
+              url = "".concat(iiifBase, "/iiif/3/").concat(obj.image_id, "/full/").concat(width, ",/0/default.auto");
               _context3.next = 4;
               return fetch(url).then(function (r) {
                 return r.blob();
@@ -9697,6 +9720,103 @@ function config (name) {
 
 }).call(this)}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
 },{}],130:[function(require,module,exports){
+'use strict'; // Projective mapping for a flat HTML element placed over a 3D painting.
+//
+// The painting is a unit quad in model space, so its four corners project to
+// four points on screen. `homography` returns the coefficients of the mapping
+// from the unit square onto that screen quad:
+//
+//   x = (a*u + b*v + c) / (g*u + h*v + 1)
+//   y = (d*u + e*v + f) / (g*u + h*v + 1)
+//
+// and `matrix3d` turns those into the CSS transform for an element of
+// `width` x `height` CSS pixels. The quad is ordered
+// [top-left, top-right, bottom-right, bottom-left] — the order the classic
+// eight-unknowns formula assumes.
+//
+// `matrix3d` is column-major, so the arguments are the columns of
+//
+//   | a/W   b/H   0  c |
+//   | d/W   e/H   0  f |
+//   |  0     0    1  0 |
+//   | g/W   h/H   0  1 |
+
+var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
+
+var _slicedToArray2 = _interopRequireDefault(require("@babel/runtime/helpers/slicedToArray"));
+
+function homography(quad) {
+  var _quad = (0, _slicedToArray2["default"])(quad, 4),
+      p0 = _quad[0],
+      p1 = _quad[1],
+      p2 = _quad[2],
+      p3 = _quad[3];
+
+  var x0 = p0[0],
+      y0 = p0[1];
+  var x1 = p1[0],
+      y1 = p1[1];
+  var x2 = p2[0],
+      y2 = p2[1];
+  var x3 = p3[0],
+      y3 = p3[1];
+  var dx1 = x1 - x2;
+  var dx2 = x3 - x2;
+  var dx3 = x0 - x1 + x2 - x3;
+  var dy1 = y1 - y2;
+  var dy2 = y3 - y2;
+  var dy3 = y0 - y1 + y2 - y3; // Affine is the common case — a wall square-on to the camera — and the
+  // projective formula would divide by zero there.
+
+  if (dx3 === 0 && dy3 === 0) {
+    return {
+      a: x1 - x0,
+      b: x3 - x0,
+      c: x0,
+      d: y1 - y0,
+      e: y3 - y0,
+      f: y0,
+      g: 0,
+      h: 0
+    };
+  }
+
+  var den = dx1 * dy2 - dx2 * dy1;
+  if (Math.abs(den) < 1e-9) return null;
+  var g = (dx3 * dy2 - dx2 * dy3) / den;
+  var h = (dx1 * dy3 - dx3 * dy1) / den;
+  return {
+    a: x1 - x0 + g * x1,
+    b: x3 - x0 + h * x3,
+    c: x0,
+    d: y1 - y0 + g * y1,
+    e: y3 - y0 + h * y3,
+    f: y0,
+    g: g,
+    h: h
+  };
+}
+
+function matrix3d(quad, width, height) {
+  var m = homography(quad);
+  if (!m) return null;
+  var a = m.a,
+      b = m.b,
+      c = m.c,
+      d = m.d,
+      e = m.e,
+      f = m.f,
+      g = m.g,
+      h = m.h;
+  return 'matrix3d(' + [a / width, d / width, 0, g / width, b / height, e / height, 0, h / height, 0, 0, 1, 0, c, f, 0, 1].join(',') + ')';
+}
+
+module.exports = {
+  homography: homography,
+  matrix3d: matrix3d
+};
+
+},{"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17}],131:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -10210,7 +10330,7 @@ module.exports = function (_ref, fovY, canvas, viewport) {
   };
 };
 
-},{"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/helpers/toConsumableArray":18,"gl-mat4":41,"gl-vec3":74,"pointer-lock":106}],131:[function(require,module,exports){
+},{"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/helpers/toConsumableArray":18,"gl-mat4":41,"gl-vec3":74,"pointer-lock":106}],132:[function(require,module,exports){
 "use strict";
 'strict mode';
 
@@ -10364,6 +10484,11 @@ module.exports = {
       total: null
     };
   },
+  // The active provider's live source, when it is a collection walk. The
+  // live-art overlay needs the policy to ask for a piece's on-chain document.
+  source: function source() {
+    return dataAccess.source ? dataAccess.source() : null;
+  },
   // Switch the live source: reset the provider (cursor/mode/policy) and drop
   // the painting cache so the next fetch repopulates from scratch. The placed
   // GPU textures are recycled by placement.reload(), which owns the batch.
@@ -10378,6 +10503,14 @@ module.exports = {
     var cbAll = arguments.length > 4 ? arguments[4] : undefined;
     var from = Object.keys(paintingCache).length;
     dataAccess.fetchList(from, count).then(function (paintings) {
+      // A page can legitimately contain no pieces (an index page of listing
+      // artifacts, all filtered out). Clear `fetching` rather than leaving
+      // the walk waiting for a callback that will never fire.
+      if (paintings.length === 0) {
+        cbAll();
+        return;
+      }
+
       count = paintings.length;
       paintings.map(function (p) {
         if (paintingCache[p.image_id]) {
@@ -10498,7 +10631,7 @@ module.exports = {
   }
 };
 
-},{"../api/api":1,"./text":137,"./ticket":138,"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/regenerator":20}],132:[function(require,module,exports){
+},{"../api/api":1,"./text":139,"./ticket":140,"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/regenerator":20}],133:[function(require,module,exports){
 'use strict'; // Virtual Art Gallery — embeddable entry point.
 //
 // Historically this module ran fullscreen on load and owned `document.body`.
@@ -10517,6 +10650,8 @@ function _unsupportedIterableToArray(o, minLen) { if (!o) return; if (typeof o =
 
 function _arrayLikeToArray(arr, len) { if (len == null || len > arr.length) len = arr.length; for (var i = 0, arr2 = new Array(len); i < len; i++) { arr2[i] = arr[i]; } return arr2; }
 
+var nearestWallHit = require('./walls');
+
 var mapVal = function mapVal(value, min1, max1, min2, max2) {
   return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
 };
@@ -10534,47 +10669,6 @@ var GAZE_Y_MAX = 3.8;
 var GAZE_STICKY = 1.15; // keep the held piece if its hit is within this factor of nearest
 
 var GAZE_WALL_EPS = 0.5; // a wall nearer than (paintingHit - this) occludes the piece
-// Nearest wall-segment hit along the screen-centre ray (xz plane), used to reject
-// painting hits that are behind a wall. Walls are gathered from the grid along the
-// ray, mirroring the touch-teleport raycast's sampling.
-
-var nearestWallHit = function nearestWallHit(mapObj, ox, oz, dx, dz, maxT) {
-  var sx = dx,
-      sz = dz;
-  var sl = Math.hypot(sx, sz) || 1;
-  sx /= sl;
-  sz /= sl;
-  var walls = [];
-  var STEP = 4;
-
-  for (var d = 0; d <= maxT + STEP; d += STEP) {
-    var segs = mapObj.getGridSegments(ox + sx * d, oz + sz * d);
-
-    for (var i = 0; i < segs.length; i++) {
-      walls.push(segs[i]);
-    }
-  }
-
-  var minT = null;
-
-  for (var _i = 0, _walls = walls; _i < _walls.length; _i++) {
-    var seg = _walls[_i];
-    var a = seg[0],
-        b = seg[1];
-    var ex = b[0] - a[0],
-        ez = b[1] - a[1];
-    var denom = dx * ez - dz * ex;
-    if (Math.abs(denom) < 1e-6) continue;
-    var aox = a[0] - ox,
-        aoz = a[1] - oz;
-    var t = (aox * ez - aoz * ex) / denom;
-    var s = (aox * dz - aoz * dx) / denom;
-    if (t <= 0 || s < 0 || s > 1) continue;
-    if (minT === null || t < minT) minT = t;
-  }
-
-  return minT;
-};
 
 function _mount(container) {
   var opts = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
@@ -10661,9 +10755,13 @@ function _mount(container) {
 
   var drawPainting = require('./painting')(regl);
 
-  var fps = require('./fps')(map, fovY, canvas, viewport); // Per-artwork presence glow intensity, keyed by image_id. Driven by the host
-  // via the `setGlow` handle; applied per painting each frame.
+  var fps = require('./fps')(map, fovY, canvas, viewport);
 
+  var liveArt = require('./live-art')(container, canvas, map);
+
+  var initialSource = texture.source ? texture.source() : null;
+  if (initialSource) liveArt.setSource(initialSource.mode, initialSource.policyId); // Per-artwork presence glow intensity, keyed by image_id. Driven by the host
+  // via the `setGlow` handle; applied per painting each frame.
 
   var glowMap = {};
   var context = regl({
@@ -10711,8 +10809,11 @@ function _mount(container) {
 
     for (var i = 0; i < batch.length; i++) {
       batch[i].glow = glowMap[batch[i].image_id] || 0;
-    }
+    } // Live on-chain pieces: keep the HTML overlay on the same projection
+    // the GL frame is about to use.
 
+
+    liveArt.update(batch, fps.view(), fps.proj(), fps.pos);
     context(function () {
       if (useReflexion) {
         reflexion(function () {
@@ -10843,7 +10944,11 @@ function _mount(container) {
       image_id: chosen.image_id,
       title: chosen.title,
       artist_title: chosen.artist_title,
-      listed: !!chosen.listed
+      listed: !!chosen.listed,
+      // CO-backed sources carry trait + rarity metadata straight through the
+      // artwork object (placement spreads `...p`); surface it for the HUD plaque.
+      traits: chosen.traits || null,
+      rarity_rank: chosen.rarity_rank != null ? chosen.rarity_rank : null
     };
   }; // Open the for-sale piece under the crosshair on its Wayup asset page. Returns
   // true if a listing was opened. image_id is "policy:asset_name_hex", which maps
@@ -10901,6 +11006,7 @@ function _mount(container) {
     // reload: reset the provider + cache, then rebuild the scene from 0.
     setSource: function setSource(mode, policy) {
       texture.setSource(mode, policy);
+      liveArt.setSource(mode, policy);
       placement.reload();
     },
     // Diagnostics for tuning the gaze pick: top-aligned piece (ungated) + pitch.
@@ -10919,6 +11025,7 @@ function _mount(container) {
     unmount: function unmount() {
       loop.cancel();
       ro.disconnect();
+      liveArt.destroy();
       fps.destroy();
       regl.destroy();
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
@@ -11004,7 +11111,619 @@ if (!window.__GALLERY_MANUAL__) {
 
 module.exports = gallery;
 
-},{"./fps":130,"./image":131,"./map":133,"./mesh":134,"./painting":135,"./placement":136,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"regl":125,"stats.js":126}],133:[function(require,module,exports){
+},{"./fps":131,"./image":132,"./live-art":134,"./map":135,"./mesh":136,"./painting":137,"./placement":138,"./walls":141,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"regl":125,"stats.js":126}],134:[function(require,module,exports){
+'use strict'; // Live on-chain art, rendered over the 3D gallery.
+//
+// A fully on-chain generative piece carries its artwork as an HTML document
+// (a `data:text/html` URI in `files[]`), not as a still. The WebGL renderer
+// can only paint the cover, so a piece with live art gets an iframe composited
+// over its wall position. The iframe is a flat rectangle; `css3d.js` computes
+// the projective `matrix3d` that maps it onto the painting's projected quad,
+// so it tracks the camera, perspective and wall angle every frame.
+//
+// Traps this module owns:
+//
+// - An iframe is always above the WebGL canvas, so a wall between the viewer
+//   and the piece would be invisible if the iframe were left mounted. The
+//   same ray test the gaze picker uses hides the piece instead.
+// - A mounted iframe is an animation loop. Only the largest few visible
+//   pieces are mounted; everything else keeps its cover. Unmounting removes
+//   the element, which is the only way to stop the document.
+// - The gallery only asks about pieces that are actually on screen, and only
+//   once per piece per session (negative answers expire, because a reveal can
+//   add art later).
+// - Sandboxing is `allow-scripts` and nothing else: `allow-same-origin` on a
+//   same-origin document would let the piece remove its own sandbox.
+
+function _createForOfIteratorHelper(o, allowArrayLike) { var it = typeof Symbol !== "undefined" && o[Symbol.iterator] || o["@@iterator"]; if (!it) { if (Array.isArray(o) || (it = _unsupportedIterableToArray(o)) || allowArrayLike && o && typeof o.length === "number") { if (it) o = it; var i = 0; var F = function F() {}; return { s: F, n: function n() { if (i >= o.length) return { done: true }; return { done: false, value: o[i++] }; }, e: function e(_e) { throw _e; }, f: F }; } throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); } var normalCompletion = true, didErr = false, err; return { s: function s() { it = it.call(o); }, n: function n() { var step = it.next(); normalCompletion = step.done; return step; }, e: function e(_e2) { didErr = true; err = _e2; }, f: function f() { try { if (!normalCompletion && it["return"] != null) it["return"](); } finally { if (didErr) throw err; } } }; }
+
+function _unsupportedIterableToArray(o, minLen) { if (!o) return; if (typeof o === "string") return _arrayLikeToArray(o, minLen); var n = Object.prototype.toString.call(o).slice(8, -1); if (n === "Object" && o.constructor) n = o.constructor.name; if (n === "Map" || n === "Set") return Array.from(o); if (n === "Arguments" || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)) return _arrayLikeToArray(o, minLen); }
+
+function _arrayLikeToArray(arr, len) { if (len == null || len > arr.length) len = arr.length; for (var i = 0, arr2 = new Array(len); i < len; i++) { arr2[i] = arr[i]; } return arr2; }
+
+var mat4 = require('gl-mat4');
+
+var nearestWallHit = require('./walls');
+
+var css3d = require('./css3d');
+
+var MAX_STAGES = 4; // concurrent iframes (each is an animation loop)
+
+var MAX_PROBES = 3; // concurrent /gallery/art requests
+
+var PROBE_WINDOW = 8; // probe only the largest visible candidates
+
+var MIN_SCREEN_H = 96; // ignore pieces smaller than this on screen
+
+var STAGE_HEIGHT = 640; // iframe backing height, in CSS px
+
+var STAGE_MAX_WIDTH = 1280;
+var NONE_TTL = 2 * 60 * 1000;
+var ERROR_TTL = 30 * 1000;
+var WALL_EPS = 0.5;
+var DEFAULT_WALL_HEIGHT = 7; // Must match the near plane in fps.js (`mat4.perspective(..., 0.1, 100)`).
+
+var NEAR_PLANE = 0.1;
+
+var modelPoint = function modelPoint(m, x, y, z) {
+  return [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]];
+};
+
+var projectPoint = function projectPoint(mvp, x, y, z, w, h, out, o) {
+  var cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+  if (cw <= 1e-4) return false;
+  var cx = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12];
+  var cy = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13];
+  out[o] = (cx / cw * 0.5 + 0.5) * w;
+  out[o + 1] = (0.5 - cy / cw * 0.5) * h;
+  return true;
+}; // The painting's front face is the model-space unit quad at z = 1. Return its
+// four screen-space corners [TL, TR, BR, BL], or null if any corner is behind
+// the camera (a quad crossing the camera plane has no useful homography).
+
+
+var projectQuad = function projectQuad(mvp, w, h) {
+  var flat = new Array(8);
+  if (!projectPoint(mvp, 0, 1, 1, w, h, flat, 0)) return null;
+  if (!projectPoint(mvp, 1, 1, 1, w, h, flat, 2)) return null;
+  if (!projectPoint(mvp, 1, 0, 1, w, h, flat, 4)) return null;
+  if (!projectPoint(mvp, 0, 0, 1, w, h, flat, 6)) return null;
+  return [[flat[0], flat[1]], [flat[2], flat[3]], [flat[4], flat[5]], [flat[6], flat[7]]];
+};
+
+var quadArea = function quadArea(quad) {
+  var sum = 0;
+
+  for (var i = 0; i < 4; i++) {
+    var a = quad[i],
+        b = quad[(i + 1) % 4];
+    sum += a[0] * b[1] - b[0] * a[1];
+  }
+
+  return Math.abs(sum) * 0.5;
+};
+
+var signedArea = function signedArea(poly) {
+  var area = 0;
+
+  for (var i = 0; i < poly.length; i++) {
+    var a = poly[i],
+        b = poly[(i + 1) % poly.length];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+
+  return area * 0.5;
+}; // A closed subpath in the wrapper's screen coordinates. The nonzero fill rule
+// subtracts a hole only when its winding is opposite the outer path, so the
+// `hole` flag normalises the direction.
+
+
+var polygonPath = function polygonPath(poly, hole) {
+  var area = signedArea(poly);
+  if (Math.abs(area) < 0.5) return null;
+  var points = (hole ? area > 0 : area < 0) ? poly.slice().reverse() : poly;
+  var d = 'M' + points[0][0].toFixed(2) + ' ' + points[0][1].toFixed(2);
+
+  for (var i = 1; i < points.length; i++) {
+    d += 'L' + points[i][0].toFixed(2) + ' ' + points[i][1].toFixed(2);
+  }
+
+  return d + 'Z';
+};
+
+var clipW = function clipW(pv, p) {
+  return pv[3] * p[0] + pv[7] * p[1] + pv[11] * p[2] + pv[15];
+}; // One half-plane of a screen-space rectangle, in Sutherland-Hodgman form.
+
+
+var clipHalf = function clipHalf(poly, axis, value, keepGreater) {
+  var out = [];
+
+  for (var i = 0; i < poly.length; i++) {
+    var p0 = poly[i];
+    var p1 = poly[(i + 1) % poly.length];
+    var a0 = p0[axis],
+        a1 = p1[axis];
+    var in0 = keepGreater ? a0 >= value : a0 <= value;
+    var in1 = keepGreater ? a1 >= value : a1 <= value;
+
+    if (in0 && in1) {
+      out.push(p1);
+    } else if (in0 !== in1) {
+      var t = (value - a0) / (a1 - a0);
+      out.push([p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t]);
+      if (in1) out.push(p1);
+    }
+  }
+
+  return out;
+}; // Keep a wall polygon bounded by the painting's screen AABB. The wall can
+// project far off-screen near the camera; the hole only matters where it
+// overlaps the painting, and the bounded path is cheaper to rasterise.
+
+
+var clipRect = function clipRect(poly, minX, minY, maxX, maxY) {
+  var out = clipHalf(poly, 0, minX, true);
+  if (out.length < 3) return out;
+  out = clipHalf(out, 0, maxX, false);
+  if (out.length < 3) return out;
+  out = clipHalf(out, 1, minY, true);
+  if (out.length < 3) return out;
+  return clipHalf(out, 1, maxY, false);
+}; // Sutherland-Hodgman against the near plane in homogeneous `w`. A wall can be
+// much longer than the visible room and run past the camera; its far end is
+// behind the near plane, and projecting the whole quad as a single polygon is
+// not defined. Clip the face first, then project the part that is actually on
+// screen.
+
+
+var clipNear = function clipNear(points, pv) {
+  var out = [];
+  var n = points.length;
+
+  for (var i = 0; i < n; i++) {
+    var p0 = points[i];
+    var p1 = points[(i + 1) % n];
+    var w0 = clipW(pv, p0);
+    var w1 = clipW(pv, p1);
+    var in0 = w0 >= NEAR_PLANE;
+    var in1 = w1 >= NEAR_PLANE;
+
+    if (in0 && in1) {
+      out.push(p1);
+    } else if (in0 !== in1) {
+      var t = (NEAR_PLANE - w0) / (w1 - w0);
+      out.push([p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t, p0[2] + (p1[2] - p0[2]) * t]);
+      if (in1) out.push(p1);
+    }
+  }
+
+  return out;
+}; // Project a wall face after clipping it to the near plane. Returns a convex
+// screen polygon (3-5 points), or null when no part of the face is visible.
+
+
+var projectWall = function projectWall(pv, a, b, height, w, h) {
+  var clipped = clipNear([[a[0], 0, a[1]], [b[0], 0, b[1]], [b[0], height, b[1]], [a[0], height, a[1]]], pv);
+  if (clipped.length < 3) return null;
+  var flat = new Array(2);
+  var out = [];
+
+  for (var i = 0; i < clipped.length; i++) {
+    var p = clipped[i];
+    if (!projectPoint(pv, p[0], p[1], p[2], w, h, flat, 0)) return null;
+    out.push([flat[0], flat[1]]);
+  }
+
+  return out;
+};
+
+module.exports = function (container, canvas, map) {
+  var overlay = document.createElement('div'); // `isolation` contains the per-iframe z-index used for depth ordering, so
+  // an iframe can never paint over the host's HUD.
+
+  overlay.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;isolation:isolate;'; // The overlay is sized by the container; an absolutely positioned child
+  // needs a positioned ancestor. Do not disturb a host that already has one.
+
+  var containerPosition = window.getComputedStyle(container).position;
+
+  if (!containerPosition || containerPosition === 'static') {
+    container.style.position = 'relative';
+  }
+
+  container.appendChild(overlay); // image_id -> { status, src, retryAt, controller }
+  // status: 'loading' | 'ready' | 'none' | 'error'
+
+  var arts = new Map(); // image_id -> { el, wrapper, width, height, clip }
+
+  var mounted = new Map();
+  var sourcePolicy = '';
+  var enabled = false;
+  var destroyed = false;
+  var probesInFlight = 0;
+
+  var unmount = function unmount(imageId) {
+    var stage = mounted.get(imageId);
+    if (!stage) return;
+    mounted["delete"](imageId);
+    if (stage.wrapper.parentNode) stage.wrapper.parentNode.removeChild(stage.wrapper);
+  };
+
+  var unmountAll = function unmountAll() {
+    for (var _i = 0, _Array$from = Array.from(mounted.keys()); _i < _Array$from.length; _i++) {
+      var id = _Array$from[_i];
+      unmount(id);
+    }
+  };
+
+  var abortProbes = function abortProbes() {
+    var _iterator = _createForOfIteratorHelper(arts.values()),
+        _step;
+
+    try {
+      for (_iterator.s(); !(_step = _iterator.n()).done;) {
+        var entry = _step.value;
+        if (!entry.controller) continue;
+
+        try {
+          entry.controller.abort();
+        } catch (e) {
+          /* already settled */
+        }
+
+        entry.controller = null;
+      }
+    } catch (err) {
+      _iterator.e(err);
+    } finally {
+      _iterator.f();
+    }
+  };
+
+  var reset = function reset() {
+    abortProbes();
+    arts.clear();
+    unmountAll();
+  };
+
+  var startProbe = function startProbe(imageId) {
+    var sep = imageId.indexOf(':');
+    if (sep <= 0 || sep === imageId.length - 1) return;
+    var policy = imageId.slice(0, sep);
+    var name = imageId.slice(sep + 1);
+    var entry = arts.get(imageId) || {};
+    entry.status = 'loading';
+    entry.src = undefined;
+    entry.retryAt = 0;
+    arts.set(imageId, entry);
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    entry.controller = controller;
+    probesInFlight++;
+    var url = '/gallery/art?policy=' + encodeURIComponent(policy) + '&name=' + encodeURIComponent(name);
+    fetch(url, {
+      cache: 'no-cache',
+      signal: controller ? controller.signal : undefined
+    }).then(function (r) {
+      // 204 is the ordinary answer: the piece is a still, not a document.
+      if (r.status === 204) return null;
+      if (!r.ok) throw new Error('live art ' + r.status);
+      return r.json();
+    }).then(function (json) {
+      if (destroyed) return;
+
+      if (json && typeof json.src === 'string' && json.src) {
+        entry.status = 'ready';
+        entry.src = json.src;
+        entry.retryAt = 0;
+      } else {
+        entry.status = 'none';
+        entry.retryAt = Date.now() + NONE_TTL;
+      }
+    })["catch"](function (err) {
+      if (destroyed) return;
+      if (err && err.name === 'AbortError') return;
+      entry.status = 'error';
+      entry.retryAt = Date.now() + ERROR_TTL;
+    })["finally"](function () {
+      entry.controller = null;
+      probesInFlight--;
+    });
+  };
+
+  var mount = function mount(imageId, src, p) {
+    var existing = mounted.get(imageId);
+    if (existing) return existing;
+    var aspect = typeof p.aspect === 'number' && isFinite(p.aspect) && p.aspect > 0 ? p.aspect : 1;
+    var height = STAGE_HEIGHT;
+    var width = Math.max(1, Math.round(height * aspect));
+
+    if (width > STAGE_MAX_WIDTH) {
+      width = STAGE_MAX_WIDTH;
+      height = Math.max(1, Math.round(width / aspect));
+    }
+
+    var wrapper = document.createElement('div'); // The wrapper is the untransformed, full-stage plane the clip path is
+    // expressed in. The iframe inside carries the 3D `matrix3d`, so a
+    // screen-space cut (a wall in front) can be applied to the wrapper
+    // without inverse-transforming the polygon into the iframe's UV space.
+
+    wrapper.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
+    wrapper.style.zIndex = '1';
+    var el = document.createElement('iframe');
+    el.setAttribute('sandbox', 'allow-scripts');
+    el.setAttribute('referrerpolicy', 'no-referrer');
+    el.setAttribute('title', p.title || imageId);
+    el.style.cssText = ['position:absolute', 'left:0', 'top:0', 'border:0', 'margin:0', 'padding:0', 'background:transparent', 'pointer-events:none', 'transform-origin:0 0', 'backface-visibility:hidden', 'will-change:transform', 'width:' + width + 'px', 'height:' + height + 'px'].join(';') + ';';
+    el.src = src;
+    el.addEventListener('error', function () {
+      unmount(imageId);
+      var entry = arts.get(imageId);
+
+      if (entry) {
+        entry.status = 'error';
+        entry.retryAt = Date.now() + ERROR_TTL;
+      }
+    });
+    wrapper.appendChild(el);
+    overlay.appendChild(wrapper);
+    var stage = {
+      el: el,
+      wrapper: wrapper,
+      width: width,
+      height: height,
+      clip: ''
+    };
+    mounted.set(imageId, stage);
+    return stage;
+  }; // The wall faces between the camera and a painting, projected to screen.
+  // Sampling the painting at nine points (rather than only its centre) catches
+  // a wall that cuts a corner: the centre ray can miss it while the corner ray
+  // hits it. The wall quad itself is the hole; the exact visible region is the
+  // painting quad minus these quads.
+
+
+  var occluderQuads = function occluderQuads(m, camPos, pv, w, h, bounds) {
+    var height = map.height || DEFAULT_WALL_HEIGHT;
+    var seen = new Set();
+    var quads = [];
+
+    for (var iu = 0; iu < 3; iu++) {
+      var u = 0.1 + iu * 0.4;
+
+      for (var iv = 0; iv < 3; iv++) {
+        var v = 0.1 + iv * 0.4;
+        var pt = modelPoint(m, u, v, 1);
+        var dx = pt[0] - camPos[0];
+        var dz = pt[2] - camPos[2];
+        var dist = Math.hypot(dx, dz);
+        if (dist <= 1e-3) continue;
+        var hits = nearestWallHit.segments(map, camPos[0], camPos[2], dx, dz, dist);
+
+        for (var i = 0; i < hits.length; i++) {
+          var seg = hits[i].seg;
+          if (seen.has(seg)) continue;
+          seen.add(seg);
+          var a = seg[0],
+              b = seg[1];
+          var quad = projectWall(pv, a, b, height, w, h);
+          if (!quad) continue;
+          var minX = Infinity,
+              maxX = -Infinity;
+          var minY = Infinity,
+              maxY = -Infinity;
+
+          for (var j = 0; j < quad.length; j++) {
+            var x = quad[j][0],
+                y = quad[j][1];
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+
+          if (maxX < bounds.minX || minX > bounds.maxX || maxY < bounds.minY || minY > bounds.maxY) {
+            continue;
+          }
+
+          var hole = clipRect(quad, bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+          if (hole.length < 3) continue;
+          quads.push(hole); // A painting can only have a handful of walls across it. Bound
+          // the path string for the pathological case.
+
+          if (quads.length >= 8) return quads;
+        }
+      }
+    }
+
+    return quads;
+  }; // Apply the painting quad (outer) with the wall quads as holes. The
+  // nonzero fill rule subtracts a hole whose winding is opposite the outer
+  // path, which `polygonPath` normalises.
+
+
+  var applyClip = function applyClip(stage, quad, occluders) {
+    if (!occluders.length) {
+      if (stage.clip) {
+        stage.wrapper.style.clipPath = 'none';
+        stage.clip = '';
+      }
+
+      return;
+    }
+
+    var outer = polygonPath(quad, false);
+    if (!outer) return;
+    var parts = [outer];
+
+    for (var i = 0; i < occluders.length; i++) {
+      var hole = polygonPath(occluders[i], true);
+      if (hole) parts.push(hole);
+    }
+
+    var d = parts.join(' ');
+    if (d === stage.clip) return;
+    stage.clip = d;
+    stage.wrapper.style.clipPath = "path('" + d + "')";
+  };
+
+  var update = function update(batch, view, proj, camPos) {
+    if (destroyed) return;
+
+    if (!enabled || !batch || batch.length === 0) {
+      if (mounted.size) unmountAll();
+      return;
+    }
+
+    var w = canvas.clientWidth || container.clientWidth || 1;
+    var h = canvas.clientHeight || container.clientHeight || 1;
+    var pv = mat4.multiply([], proj, view);
+    var mvp = [];
+    var candidates = [];
+
+    for (var i = 0; i < batch.length; i++) {
+      var p = batch[i];
+      var m = p.model;
+      if (!m || !p.image_id) continue;
+      var center = modelPoint(m, 0.5, 0.5, 1);
+      var vx = camPos[0] - center[0];
+      var vy = camPos[1] - center[1];
+      var vz = camPos[2] - center[2]; // The painting's front normal is the model's +z axis. A camera on
+      // the wall's back side sees the quad mirrored, not the artwork.
+
+      if (m[8] * vx + m[9] * vy + m[10] * vz <= 0) continue;
+      var quad = projectQuad(mat4.multiply(mvp, pv, m), w, h);
+      if (!quad) continue;
+      var minX = Infinity,
+          maxX = -Infinity;
+      var minY = Infinity,
+          maxY = -Infinity;
+
+      for (var c = 0; c < 4; c++) {
+        var x = quad[c][0],
+            y = quad[c][1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+
+      if (maxX < 0 || minX > w || maxY < 0 || minY > h) continue;
+      if (maxY - minY < MIN_SCREEN_H) continue;
+      var dx = center[0] - camPos[0];
+      var dz = center[2] - camPos[2];
+      var dist = Math.hypot(dx, dz);
+
+      if (dist > 1e-3) {
+        var wallT = nearestWallHit(map, camPos[0], camPos[2], dx, dz, dist);
+        if (wallT !== null && wallT < dist - WALL_EPS) continue;
+      }
+
+      candidates.push({
+        p: p,
+        quad: quad,
+        area: quadArea(quad),
+        dist: dist,
+        bounds: {
+          minX: minX,
+          maxX: maxX,
+          minY: minY,
+          maxY: maxY
+        }
+      });
+    } // Largest on screen first: the piece the viewer is looking at wins,
+    // and a far piece never takes a mount slot from a near one.
+
+
+    candidates.sort(function (a, b) {
+      return b.area - a.area;
+    });
+
+    for (var _i2 = 0; _i2 < candidates.length && _i2 < PROBE_WINDOW && probesInFlight < MAX_PROBES; _i2++) {
+      var imageId = candidates[_i2].p.image_id;
+      var entry = arts.get(imageId);
+
+      if (!entry) {
+        startProbe(imageId);
+      } else if ((entry.status === 'none' || entry.status === 'error') && Date.now() >= entry.retryAt) {
+        startProbe(imageId);
+      }
+    }
+
+    var ready = [];
+
+    for (var _i3 = 0; _i3 < candidates.length; _i3++) {
+      var _entry = arts.get(candidates[_i3].p.image_id);
+
+      if (_entry && _entry.status === 'ready' && _entry.src) {
+        candidates[_i3].entry = _entry;
+        ready.push(candidates[_i3]);
+      }
+    }
+
+    var keep = new Set();
+
+    for (var _i4 = 0; _i4 < ready.length && _i4 < MAX_STAGES; _i4++) {
+      keep.add(ready[_i4].p.image_id);
+    }
+
+    for (var _i5 = 0, _Array$from2 = Array.from(mounted.keys()); _i5 < _Array$from2.length; _i5++) {
+      var id = _Array$from2[_i5];
+      if (!keep.has(id)) unmount(id);
+    }
+
+    for (var _i6 = 0; _i6 < ready.length && _i6 < MAX_STAGES; _i6++) {
+      var _c = ready[_i6];
+      var stage = mounted.get(_c.p.image_id);
+      if (!stage) stage = mount(_c.p.image_id, _c.entry.src, _c.p);
+      if (!stage) continue;
+      var matrix = css3d.matrix3d(_c.quad, stage.width, stage.height);
+
+      if (!matrix) {
+        // Degenerate projection (a quad with no area); do not leave a
+        // stale iframe hanging in the scene.
+        unmount(_c.p.image_id);
+        continue;
+      }
+
+      stage.el.style.transform = matrix; // Nearer pieces paint over farther ones. Contained by the
+      // overlay's `isolation`; the wrapper (not the iframe) owns the
+      // stacking order because its clip path creates a context.
+
+      stage.wrapper.style.zIndex = String(Math.max(1, Math.round(100000 - _c.dist * 1000)));
+      applyClip(stage, _c.quad, occluderQuads(_c.p.model, camPos, pv, w, h, _c.bounds));
+    }
+  };
+
+  var setSource = function setSource(mode, policy) {
+    var nextMode = mode || '';
+    var nextPolicy = policy || '';
+    var nextEnabled = (nextMode === 'listed' || nextMode === 'collection') && !!nextPolicy; // A policy switch is a new collection: drop cached answers and in-flight
+    // probes. A listed↔collection toggle keeps the cache — the pieces are
+    // the same, only the set changes.
+
+    if (nextPolicy !== sourcePolicy) reset();
+    sourcePolicy = nextPolicy;
+    enabled = nextEnabled;
+    if (!enabled) unmountAll();
+  };
+
+  var destroy = function destroy() {
+    destroyed = true;
+    abortProbes();
+    arts.clear();
+    unmountAll();
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+  };
+
+  return {
+    setSource: setSource,
+    update: update,
+    reset: reset,
+    destroy: destroy
+  };
+};
+
+},{"./css3d":130,"./walls":141,"gl-mat4":41}],135:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -11399,11 +12118,14 @@ module.exports = function () {
     getGridParts: getGridParts,
     position: position,
     normal: normal,
-    elements: elements
+    elements: elements,
+    // Wall height, for consumers that project the wall faces (the live-art
+    // overlay clips an iframe against them).
+    height: h
   };
 };
 
-},{"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/helpers/toConsumableArray":18}],134:[function(require,module,exports){
+},{"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/helpers/slicedToArray":17,"@babel/runtime/helpers/toConsumableArray":18}],136:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -11480,7 +12202,7 @@ module.exports = function (regl, data, useReflexion) {
   });
 };
 
-},{"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/regenerator":20}],135:[function(require,module,exports){
+},{"@babel/runtime/helpers/asyncToGenerator":10,"@babel/runtime/helpers/interopRequireDefault":12,"@babel/runtime/regenerator":20}],137:[function(require,module,exports){
 'use strict';
 
 var text = require('./text');
@@ -11490,7 +12212,7 @@ var ticket = require('./ticket');
 module.exports = function (regl) {
   var drawText = text.draw(regl);
   var painting = regl({
-    frag: "\n\tprecision lowp float;\n\tuniform sampler2D tex;\n\tuniform float glow;\n\tvarying vec3 uv;\n\n\t// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/\n\t// This approximates the error function, needed for the gaussian integral\n\tvec4 erf(vec4 x) {\n\t\tvec4 s = sign(x), a = abs(x);\n\t\tx = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;\n\t\tx *= x;\n\t\treturn s - s / (x * x);\n\t}\n\n\t// Return the mask for the shadow of a box from lower to upper\n\tfloat boxShadow(vec2 lower, vec2 upper, vec2 point, float sigma) {\n\t\tvec4 query = vec4(point - lower, upper - point);\n\t\tvec4 integral = 0.5 + 0.5 * erf(query * (sqrt(0.5) / sigma));\n\t\treturn (integral.z - integral.x) * (integral.w - integral.y);\n\t}\n\n\tvoid main () {\n\t\tfloat frontMask = smoothstep(0.9, 1.0, uv.z);\n\t\tfloat paintingMask = step(0.001, uv.z);\n\t\tfloat shadowAlpha = boxShadow(vec2(.5), vec2(.7), abs(uv.xy-vec2(.5)), 0.02);\n\t\tfloat wrapping = 0.005 * sign(uv.x-.5) * (1.-uv.z);\n\t\tfloat sideShading = pow(uv.z/4.0, 0.1);\n\t\tvec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;\n\t\tcol *= mix(sideShading, 1., frontMask);\n\t\t// Presence rim-glow: intensity scales with concurrent viewers.\n\t\tfloat glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));\n\t\tfloat glowRim = smoothstep(0.34, 0.5, glowEdge) * frontMask;\n\t\tcol += vec3(0.35, 0.75, 1.0) * glow * glowRim;\n\t\tgl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);\n\t}",
+    frag: "\n\tprecision lowp float;\n\tuniform sampler2D tex;\n\tuniform float glow;\n\tvarying vec3 uv;\n\n\t// http://madebyevan.com/shaders/fast-rounded-rectangle-shadows/\n\t// This approximates the error function, needed for the gaussian integral\n\tvec4 erf(vec4 x) {\n\t\tvec4 s = sign(x), a = abs(x);\n\t\tx = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;\n\t\tx *= x;\n\t\treturn s - s / (x * x);\n\t}\n\n\t// Return the mask for the shadow of a box from lower to upper\n\tfloat boxShadow(vec2 lower, vec2 upper, vec2 point, float sigma) {\n\t\tvec4 query = vec4(point - lower, upper - point);\n\t\tvec4 integral = 0.5 + 0.5 * erf(query * (sqrt(0.5) / sigma));\n\t\treturn (integral.z - integral.x) * (integral.w - integral.y);\n\t}\n\n\tvoid main () {\n\t\tfloat frontMask = smoothstep(0.9, 1.0, uv.z);\n\t\tfloat paintingMask = step(0.001, uv.z);\n\t\tfloat shadowAlpha = boxShadow(vec2(.5), vec2(.7), abs(uv.xy-vec2(.5)), 0.02);\n\t\tfloat wrapping = 0.005 * sign(uv.x-.5) * (1.-uv.z);\n\t\tfloat sideShading = pow(uv.z/4.0, 0.1);\n\t\tvec3 col = texture2D(tex, uv.xy - vec2(wrapping, 0.)).rgb;\n\t\tcol *= mix(sideShading, 1., frontMask);\n\t\t// Attention highlight: light the FRAME, not the art. Presence intensity\n\t\t// (concurrent viewers) warms the beveled contour plus a thin crisp edge\n\t\t// line, so the canvas pixels themselves are never tinted.\n\t\tfloat glowEdge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));\n\t\tfloat frameBand = 1.0 - frontMask;                            // beveled contour / sides\n\t\tfloat edgeLine = smoothstep(0.47, 0.5, glowEdge) * frontMask; // ~3%-wide inner edge only\n\t\tfloat highlight = (frameBand + 0.5 * edgeLine) * glow;\n\t\tcol += vec3(0.90, 0.82, 0.55) * 0.6 * highlight;              // soft warm-white lift\n\t\tgl_FragColor = mix(vec4(0.,0.,0.,shadowAlpha), vec4(col,1.), paintingMask);\n\t}",
     vert: "\n\tprecision highp float;\n\tuniform mat4 proj, view, model;\n\tuniform float yScale;\n\tattribute vec3 pos;\n\tvarying vec3 uv;\n\tvoid main () {\n\t\tuv = pos;\n\t\tvec4 mpos = model * vec4(pos, 1);\n\t\tmpos.y *= yScale;\n\t\tgl_Position = proj * view * mpos;\n\t}",
     attributes: {
       pos: [0, 0, 1, //Front
@@ -11543,7 +12265,7 @@ module.exports = function (regl) {
   };
 };
 
-},{"./text":137,"./ticket":138}],136:[function(require,module,exports){
+},{"./text":139,"./ticket":140}],138:[function(require,module,exports){
 'use strict';
 
 var _interopRequireDefault = require("@babel/runtime/helpers/interopRequireDefault");
@@ -11764,7 +12486,7 @@ module.exports = function (regl, _ref2) {
   };
 };
 
-},{"./image":131,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"gl-mat4":41,"gl-vec3":74}],137:[function(require,module,exports){
+},{"./image":132,"@babel/runtime/helpers/defineProperty":11,"@babel/runtime/helpers/interopRequireDefault":12,"gl-mat4":41,"gl-vec3":74}],139:[function(require,module,exports){
 "use strict";
 'strict mode';
 
@@ -11866,7 +12588,7 @@ module.exports = {
   }
 };
 
-},{}],138:[function(require,module,exports){
+},{}],140:[function(require,module,exports){
 "use strict";
 'strict mode'; // "For sale" price ticket — a small card placed on the artwork's bottom-right
 // corner, like a price sticker in a physical gallery. Drawn into a canvas
@@ -11952,4 +12674,71 @@ module.exports = {
   }
 };
 
-},{}]},{},[132]);
+},{}],141:[function(require,module,exports){
+'use strict'; // Nearest wall-segment hit along a horizontal ray (the xz plane). Used both by
+// the gazer (`current()` in index.js) to reject a painting behind a wall and
+// by the live-art overlay: an iframe is always composited over the WebGL
+// canvas, so a piece in another room would otherwise show through the wall.
+//
+// `dx`/`dz` are a direction (normalised here), and `maxT` is a distance along
+// it. `nearestWallHit` returns the nearest hit distance (or null);
+// `nearestWallHit.segments` returns every hit closer than `maxT`, deduplicated
+// by wall segment — the overlay needs the faces themselves, not just the
+// distance, to clip the iframe.
+//
+// The intersection is evaluated as each grid cell's segments are read rather
+// than collected first: the overlay runs this every frame, and the array it
+// would otherwise build is pure garbage collection.
+
+var scan = function scan(mapObj, ox, oz, dx, dz, maxT, onHit) {
+  var sl = Math.hypot(dx, dz) || 1;
+  dx /= sl;
+  dz /= sl;
+  var STEP = 4;
+
+  for (var d = 0; d <= maxT + STEP; d += STEP) {
+    var segs = mapObj.getGridSegments(ox + dx * d, oz + dz * d);
+
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i];
+      var a = seg[0],
+          b = seg[1];
+      var ex = b[0] - a[0],
+          ez = b[1] - a[1];
+      var denom = dx * ez - dz * ex;
+      if (Math.abs(denom) < 1e-6) continue;
+      var aox = a[0] - ox,
+          aoz = a[1] - oz;
+      var t = (aox * ez - aoz * ex) / denom;
+      var s = (aox * dz - aoz * dx) / denom;
+      if (t <= 0 || s < 0 || s > 1) continue;
+      onHit(t, seg);
+    }
+  }
+};
+
+var nearestWallHit = function nearestWallHit(mapObj, ox, oz, dx, dz, maxT) {
+  var minT = null;
+  scan(mapObj, ox, oz, dx, dz, maxT, function (t) {
+    if (minT === null || t < minT) minT = t;
+  });
+  return minT;
+};
+
+nearestWallHit.segments = function (mapObj, ox, oz, dx, dz, maxT) {
+  var seen = new Set();
+  var hits = [];
+  scan(mapObj, ox, oz, dx, dz, maxT, function (t, seg) {
+    if (t >= maxT || seen.has(seg)) return;
+    seen.add(seg);
+    hits.push({
+      t: t,
+      seg: seg
+    });
+  });
+  return hits;
+};
+
+module.exports = nearestWallHit;
+
+},{}]},{},[133]);

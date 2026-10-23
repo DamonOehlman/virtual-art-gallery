@@ -86,6 +86,9 @@ module.exports = {
 	// Background-load status from the active provider (for the host shell's
 	// "loading listings" affordance); providers without it report not-loading.
 	progress: () => (dataAccess.progress ? dataAccess.progress() : { loading: false, total: null }),
+	// The active provider's live source, when it is a collection walk. The
+	// live-art overlay needs the policy to ask for a piece's on-chain document.
+	source: () => (dataAccess.source ? dataAccess.source() : null),
 	// Switch the live source: reset the provider (cursor/mode/policy) and drop
 	// the painting cache so the next fetch repopulates from scratch. The placed
 	// GPU textures are recycled by placement.reload(), which owns the batch.
@@ -96,6 +99,13 @@ module.exports = {
 	fetch: (regl, count = 10, res = "low", cbOne, cbAll) => {
 		const from = Object.keys(paintingCache).length;
 		dataAccess.fetchList(from, count).then(paintings => {
+			// A page can legitimately contain no pieces (an index page of listing
+			// artifacts, all filtered out). Clear `fetching` rather than leaving
+			// the walk waiting for a callback that will never fire.
+			if (paintings.length === 0) {
+				cbAll();
+				return;
+			}
 			count = paintings.length;
 			paintings.map(p => {
 				if (paintingCache[p.image_id]) {

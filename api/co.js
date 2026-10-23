@@ -66,12 +66,25 @@ module.exports = {
     loading = !!json.loading;
     if (json.total != null) total = json.total;
     if (loading) scheduleStatusPoll();
-    return json.artworks || [];
+    // `image_id` is `policy:asset_name_hex`. An empty name hex has no
+    // addressable image or live document; a stale source must not turn it
+    // into a IIIF 400 (or a `/gallery/art` probe).
+    return (json.artworks || []).filter(
+      (a) => a.image_id && !a.image_id.endsWith(":")
+    );
   },
 
   // Background-load status for the host shell's progress affordance.
   progress: function () {
     return { loading, total };
+  },
+
+  // The live source this provider is walking. The renderer's live-art overlay
+  // uses the policy to ask the gallery worker for a piece's on-chain document;
+  // a provider without this method is not a collection walk and gets no
+  // overlay.
+  source: function () {
+    return { mode, policyId };
   },
 
   // Switch the live source (listed↔collection / policy) at runtime; resets the
@@ -86,7 +99,10 @@ module.exports = {
 
   fetchImage: async function (obj, advicedResolution) {
     const width = resolutions[advicedResolution];
-    const url = `${iiifBase}/iiif/3/${obj.image_id}/full/${width},/0/default.jpg`;
+    // `.auto` — the service picks the container from what it knows the art to
+    // be, so pixel-art collections arrive lossless rather than as a blurred
+    // JPEG, with no redirect round trip. See api/cnft.js.
+    const url = `${iiifBase}/iiif/3/${obj.image_id}/full/${width},/0/default.auto`;
     const blob = await fetch(url).then((r) => r.blob());
     return {
       // Price is NOT merged into the title — listed pieces get a separate gold
